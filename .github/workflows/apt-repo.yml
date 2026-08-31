@@ -1,0 +1,81 @@
+name: APT repository
+
+on:
+  # Rebuild after a release is published (the release workflow creates it on tags).
+  release:
+    types: [published]
+  # Allow manual rebuilds (e.g. after rotating the signing key).
+  workflow_dispatch:
+
+# Only one Pages deployment at a time.
+concurrency:
+  group: apt-repo
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  build-and-deploy:
+    name: Build signed APT repo and deploy to Pages
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install tooling
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends apt-utils gnupg
+
+      - name: Import signing key
+        env:
+          APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
+        run: |
+          if [ -z "${APT_GPG_PRIVATE_KEY:-}" ]; then
+            echo "::error::APT_GPG_PRIVATE_KEY secret is not set. Run scripts/setup-apt-signing-key.sh first."
+            exit 1
+          fi
+          export GNUPGHOME="$(mktemp -d)"
+          echo "GNUPGHOME=$GNUPGHOME" >> "$GITHUB_ENV"
+          printf '%s' "$APT_GPG_PRIVATE_KEY" | gpg --batch --import
+
+      - name: Download all released .deb assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p pool-src
+          # Pull every .deb asset from every published release so the repo
+          # always contains the full version history.
+          mapfile -t urls < <(gh api --paginate \
+            repos/${{ github.repository }}/releases \
+            --jq '.[].assets[].browser_download_url' | grep '_all\.deb$' || true)
+          if [ "${#urls[@]}" -eq 0 ]; then
+            echo "::warning::No .deb release assets found yet."
+          fi
+          for u in "${urls[@]}"; do
+            echo "Fetching $u"
+            (cd pool-src && curl -fsSLO "$u")
+          done
+          ls -l pool-src || true
+
+      - name: Build signed APT repository
+        run: |
+          chmod +x scripts/build-apt-repo.sh
+          scripts/build-apt-repo.sh --pool pool-src --out public --suite stable
+          # Landing page.
+          cp docs/apt/index.html public/index.html 2>/dev/null || true
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+
+      - name: Deploy to GitHub Pages
+        id: deploy
+        uses: actions/deploy-pages@v4

@@ -1,0 +1,34 @@
+oob-usb-serial (1.0.3) unstable; urgency=medium
+
+  * interactive: add a framing menu applied via stty before the console opens.
+    Choose an editable preset (from
+    /usr/share/oob-usb-serial/serial_framings.txt) or "Custom" to set data
+    bits, parity, stop bits and flow control individually.
+
+ -- diaznet <diaznet@users.noreply.github.com>  Mon, 31 Aug 2026 23:15:00 +0000
+
+oob-usb-serial (1.0.2) unstable; urgency=medium
+
+  * interactive/start: pre-flight serial device access check with an
+    actionable hint (join the dialout group) instead of screen silently
+    terminating when the device is not accessible.
+
+ -- diaznet <diaznet@users.noreply.github.com>  Mon, 31 Aug 2026 21:15:00 +0000
+
+oob-usb-serial (1.0.1) unstable; urgency=medium
+
+  * Build the package with xz compression (-Zxz) so it installs on older dpkg
+    (Debian 10/11, older Raspberry Pi OS) that cannot decompress zstd.
+
+ -- diaznet <diaznet@users.noreply.github.com>  Mon, 31 Aug 2026 20:45:00 +0000
+
+oob-usb-serial (1.0.0) unstable; urgency=medium
+
+  * Initial release.
+  * Robust USB serial adapter discovery via udev (stable ID_SERIAL matching).
+  * Config-driven screenrc generation: per-device name, baud and framing.
+  * Single detached GNU screen session with one named window per adapter.
+  * Auto mode (open all adapters) and interactive dialog picker.
+  * systemd service for boot-time startup and opt-in login auto-attach.
+
+ -- diaznet <diaznet@users.noreply.github.com>  Mon, 31 Aug 2026 00:00:00 +0000

@@ -1,0 +1,39 @@
+# bash completion for oob-usb-serial
+#
+# Installed to /usr/share/bash-completion/completions/oob-usb-serial and sourced
+# on demand by the bash-completion framework.
+
+_oob_usb_serial() {
+    local cur cword
+    if declare -F _init_completion >/dev/null 2>&1; then
+        _init_completion || return
+    else
+        # Minimal fallback if bash-completion helpers are unavailable.
+        COMPREPLY=()
+        cur="${COMP_WORDS[COMP_CWORD]}"
+        cword="$COMP_CWORD"
+    fi
+
+    local subcommands="discover list start attach stop status interactive config help"
+
+    # First argument: complete the subcommand.
+    if [ "${cword:-$COMP_CWORD}" -eq 1 ]; then
+        mapfile -t COMPREPLY < <(compgen -W "$subcommands" -- "$cur")
+        return 0
+    fi
+
+    # Second argument: only `config` takes an option (--generate).
+    case "${COMP_WORDS[1]}" in
+        config)
+            if [ "${cword:-$COMP_CWORD}" -eq 2 ]; then
+                mapfile -t COMPREPLY < <(compgen -W "--generate" -- "$cur")
+            fi
+            ;;
+        *)
+            COMPREPLY=()
+            ;;
+    esac
+    return 0
+}
+
+complete -F _oob_usb_serial oob-usb-serial

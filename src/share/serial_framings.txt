@@ -1,0 +1,21 @@
+# Serial framing presets for oob-usb-serial interactive mode.
+#
+# One preset per line:   <label> | <stty options, comma-separated>
+#
+# The label is shown in the interactive menu; the stty options are applied to
+# the tty before the console opens. Edit this file to add or change presets -
+# no need to touch any script. Lines starting with '#' and blank lines are
+# ignored.
+#
+# stty option reference:
+#   data bits : cs5 cs6 cs7 cs8
+#   parity    : parenb (on) / -parenb (off) ; parodd (odd)
+#   stop bits : cstopb (2) / -cstopb (1)
+#   flow ctrl : crtscts (hardware) / ixon,ixoff (software) / -crtscts (none)
+
+8N1 (no flow control)|cs8,-parenb,-cstopb
+8N1 + RTS/CTS hardware flow|cs8,-parenb,-cstopb,crtscts
+8N1 + XON/XOFF software flow|cs8,-parenb,-cstopb,ixon,ixoff
+7E1 (7 data, even parity)|cs7,parenb,-cstopb
+7O1 (7 data, odd parity)|cs7,parenb,parodd,-cstopb
+8N2 (8 data, 2 stop bits)|cs8,-parenb,cstopb

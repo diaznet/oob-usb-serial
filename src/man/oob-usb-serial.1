@@ -1,0 +1,94 @@
+.TH OOB-USB-SERIAL 1 "2026-08-31" "oob-usb-serial 1.0.0" "User Commands"
+.SH NAME
+oob-usb-serial \- out-of-band USB serial console multiplexer
+.SH SYNOPSIS
+.B oob-usb-serial
+.I command
+.RI [ args ]
+.SH DESCRIPTION
+.B oob-usb-serial
+discovers every USB-to-serial adapter attached to the host and opens each one
+as a named window inside a single detached GNU
+.BR screen (1)
+session. Adapters are matched by their stable udev
+.B ID_SERIAL
+identifier rather than by their
+.I /dev/ttyUSBx
+node, which is not stable across reboots or replugs.
+.PP
+It is intended to turn a small Linux host, such as a Raspberry Pi Zero with a
+USB hub and several serial adapters, into an out-of-band access box reachable
+over SSH.
+.SH COMMANDS
+.TP
+.B discover
+List discovered adapters as raw tab-separated records
+(device node, ID_SERIAL, vendor, model).
+.TP
+.B list
+Human-friendly table of adapters and their resolved configuration.
+.TP
+.B start
+Generate the screenrc and start the detached session, one window per adapter.
+.TP
+.B attach
+Attach to the session, starting it first if it is not running.
+.TP
+.B stop
+Terminate the session.
+.TP
+.B status
+Report whether the session is running.
+.TP
+.B interactive
+Use
+.BR dialog (1)
+menus to choose a baud rate, a framing and a device, then open it. Framing is
+either a preset (read from
+.IR /usr/share/oob-usb-serial/serial_framings.txt )
+or
+.BR Custom ,
+which prompts for data bits, parity, stop bits and flow control individually.
+This opens a plain
+.BR screen (1)
+session; leave it with
+.B Ctrl-a k
+(kill the window) or
+.B Ctrl-a \e
+(quit screen).
+.TP
+.B config
+Interactively map each discovered adapter into
+.IR devices.conf ,
+prompting for a window name, baud rate and framing (adapters already mapped are
+skipped). Writing usually requires root.
+.TP
+.B config \-\-generate
+Print the generated screenrc to standard output without making any changes.
+.TP
+.B help
+Show usage information.
+.SH FILES
+.TP
+.I /etc/oob-usb-serial/oob-usb-serial.conf
+Global defaults: default baud rate, framing, session name and OOB user.
+.TP
+.I /etc/oob-usb-serial/devices.conf
+Per-device mappings in INI format. Each
+.RI [ section ]
+names a screen window and contains a
+.B match
+glob (against udev ID_SERIAL) plus optional
+.B baud
+and
+.B framing
+keys.
+.TP
+.I /usr/share/bash-completion/completions/oob-usb-serial
+Bash tab-completion for the subcommands.
+.SH SEE ALSO
+.BR screen (1),
+.BR stty (1),
+.BR udevadm (8)
+.SH AUTHOR
+diaznet

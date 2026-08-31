@@ -1,0 +1,30 @@
+#!/bin/sh
+# postinst script for oob-usb-serial
+set -e
+
+OOB_USER="oob"
+
+case "$1" in
+    configure)
+        # Create a dedicated system user to own the console session, if it does
+        # not already exist. Membership in 'dialout' grants access to the
+        # /dev/ttyUSB* serial devices.
+        if ! getent passwd "$OOB_USER" >/dev/null 2>&1; then
+            adduser --system --group \
+                    --home /var/lib/oob-usb-serial \
+                    --shell /bin/bash \
+                    --gecos "OOB serial console" \
+                    "$OOB_USER" || true
+        fi
+        # Ensure the user can access serial devices.
+        if getent group dialout >/dev/null 2>&1; then
+            adduser "$OOB_USER" dialout || true
+        fi
+        ;;
+    abort-upgrade|abort-remove|abort-deconfigure)
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0

@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  lint-and-build:
+    name: Lint and test build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install tooling
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            shellcheck build-essential dpkg-dev debhelper fakeroot lintian
+
+      - name: ShellCheck
+        run: make check
+
+      - name: Build .deb (no tag => uses changelog version)
+        run: bash ./build.sh
+
+      - name: Lintian
+        run: |
+          deb=$(ls dist/*.deb | head -1)
+          echo "Linting $deb"
+          lintian "$deb"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: oob-usb-serial-deb
+          path: dist/*.deb
+          if-no-files-found: error

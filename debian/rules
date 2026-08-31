@@ -1,0 +1,19 @@
+#!/usr/bin/make -f
+# Debian packaging rules for oob-usb-serial.
+
+%:
+	dh $@
+
+# The upstream Makefile handles installation into $(DESTDIR); debhelper drives
+# it via dh_auto_install with the correct DESTDIR and PREFIX.
+override_dh_auto_build:
+	# Nothing to compile.
+
+override_dh_auto_install:
+	$(MAKE) install DESTDIR=$(CURDIR)/debian/oob-usb-serial PREFIX=/usr
+
+# Force xz compression. Newer dpkg (e.g. on Ubuntu 24.04 CI runners) defaults
+# to zstd, which older dpkg on Debian 10/11 and older Raspberry Pi OS cannot
+# decompress. xz is understood by every currently-supported dpkg.
+override_dh_builddeb:
+	dh_builddeb -- -Zxz

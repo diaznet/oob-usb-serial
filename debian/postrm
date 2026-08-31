@@ -1,0 +1,7 @@
+#!/bin/sh
+# postrm script for oob-usb-serial
+set -e
+
+#DEBHELPER#
+
+exit 0

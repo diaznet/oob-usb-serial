@@ -1,0 +1,51 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write   # required to create a GitHub Release and upload assets
+
+jobs:
+  build-and-release:
+    name: Build and publish .deb
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # need tags for version derivation
+
+      - name: Derive version from tag
+        id: ver
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          version="${tag#v}"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Building version $version from tag $tag"
+
+      - name: Install tooling
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            shellcheck build-essential dpkg-dev debhelper fakeroot lintian
+
+      - name: ShellCheck
+        run: make check
+
+      - name: Build .deb
+        run: bash ./build.sh "${{ steps.ver.outputs.version }}"
+
+      - name: Lintian
+        run: |
+          deb=$(ls dist/*.deb | head -1)
+          lintian "$deb" || true   # do not fail the release on lintian warnings
+
+      - name: Create GitHub Release and upload .deb
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.deb
+          generate_release_notes: true
+          fail_on_unmatched_files: true

@@ -1,0 +1,31 @@
+Source: oob-usb-serial
+Section: comm
+Priority: optional
+Maintainer: diaznet <diaznet@users.noreply.github.com>
+Build-Depends: debhelper-compat (= 12)
+Standards-Version: 4.5.0
+Homepage: https://github.com/diaznet/oob-usb-serial
+Rules-Requires-Root: no
+
+Package: oob-usb-serial
+Architecture: all
+Depends: ${misc:Depends},
+         screen,
+         udev,
+         adduser
+Recommends: dialog,
+            bash-completion
+Description: Out-of-band USB serial console multiplexer
+ oob-usb-serial turns a small Linux host (such as a Raspberry Pi Zero with a
+ USB hub and several USB-to-serial adapters) into an out-of-band access box for
+ network and server equipment.
+ .
+ It discovers every attached USB-to-serial adapter, matches each one against an
+ optional per-device configuration keyed by its stable udev serial identifier,
+ and opens all of them as named windows inside a single detached GNU screen
+ session. Baud rate and full serial framing (data bits, parity, stop bits and
+ flow control) are configurable per device, with sensible global defaults for
+ adapters that are not explicitly mapped.
+ .
+ A systemd service can bring the session up at boot, and an opt-in login
+ snippet attaches a dedicated user straight into the consoles on SSH login.

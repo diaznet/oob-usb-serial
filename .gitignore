@@ -1,0 +1,21 @@
+# Debian build artifacts
+/debian/oob-usb-serial/
+/debian/.debhelper/
+/debian/files
+/debian/debhelper-build-stamp
+/debian/*.substvars
+/debian/*.log
+
+# Built packages (kept out of the tree; publish via releases)
+*.deb
+*.buildinfo
+*.changes
+
+# APT signing private key — must never be committed
+apt-signing-private-key.asc
+*.private.asc
+/public/
+
+# Temporary/scratch
+.tmp-*.sh
+*~
