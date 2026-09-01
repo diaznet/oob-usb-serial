@@ -38,9 +38,14 @@ can change across reboots and replugs):
 
 ### tmux session specifics
 
-- The session runs on a **dedicated socket** (`tmux -L oob`) so the systemd
-  service and an interactive SSH login unambiguously share the same server,
-  regardless of `$TMUX_TMPDIR` differences between environments.
+- The session runs on a **dedicated socket** (`tmux -L oob`) owned by the
+  `OOB_USER` (default `oob`). Note that `tmux -L <name>` sockets are
+  **per-user**, so all session commands (`start`/`stop`/`attach`/`status`)
+  must run as `OOB_USER` to share the one real server. The CLI enforces this:
+  when invoked as root (e.g. via `sudo`) it re-executes itself as `OOB_USER`
+  (`runuser`, falling back to `sudo -u`); invoked as another non-root user it
+  refuses with a clear message. This prevents each user from spawning a
+  separate, colliding tmux server.
 - A generated tmux config (not the user's `~/.tmux.conf`) sets:
   - `remain-on-exit on` — a console whose `tio` exits leaves a visible dead
     window with its exit status instead of silently vanishing.

@@ -124,7 +124,6 @@ Dependency handling is declarative — nothing is bundled or vendored:
 | Kind | Packages | Managed by |
 |------|----------|------------|
 | Runtime (required) | `tio`, `tmux`, `udev`, `adduser` | `Depends:` in the package; `apt` installs them |
-| Runtime (optional) | `dialog` (only for interactive mode) | `Recommends:` in the package |
 | Build-time only | `dpkg-dev`, `debhelper`, `fakeroot` | installed by CI / your build host |
 
 There is no language runtime dependency (no Python/Node): the tool is `bash`
@@ -139,7 +138,6 @@ oob-usb-serial start         # start the detached session (one window/adapter)
 oob-usb-serial attach        # attach to the session (starts it if needed)
 oob-usb-serial status        # is the session running?
 oob-usb-serial stop          # tear the session down
-oob-usb-serial interactive   # dialog picker: speed + framing, then device
 sudo oob-usb-serial config   # interactively map adapters into devices.conf
 ```
 
@@ -148,13 +146,13 @@ window name, baud rate, data bits, parity, stop bits and flow control, then
 appends the matching INI section to `devices.conf` (matched by the adapter's
 exact `ID_SERIAL`). It needs root to write under `/etc`.
 
-Inside the `tmux` session (`start`/`attach`): `Ctrl-b n` / `Ctrl-b p` switch
-consoles, `Ctrl-b w` lists them, `Ctrl-b d` detaches, and `Ctrl-b R` relaunches
-a console that has closed. Inside a console, `tio` quits with `Ctrl-t q`.
+The session commands (`start`/`stop`/`attach`/`status`) always act on the
+`oob` user's session; run them as `oob` or via `sudo` (which redirects to
+`oob`) so everyone shares the one session.
 
-`interactive` prompts for a baud rate and the framing (data bits, parity, stop
-bits, flow control), then opens a single device with `tio`; quit it with
-`Ctrl-t q`.
+Inside the `tmux` session: `Ctrl-b n` / `Ctrl-b p` switch consoles, `Ctrl-b w`
+lists them, `Ctrl-b d` detaches, and `Ctrl-b R` relaunches a console that has
+closed. Inside a console, `tio` quits with `Ctrl-t q`.
 
 ### Serial device permissions
 
@@ -170,8 +168,6 @@ be in that group to open them. The commands detect this and print a hint.
   sudo usermod -aG dialout "$USER"
   # then log out and back in (group changes apply to new sessions)
   ```
-
-Running under `sudo` also works but is discouraged for an interactive session.
 
 ### Tab completion
 

@@ -14,7 +14,7 @@ _oob_usb_serial() {
         cword="$COMP_CWORD"
     fi
 
-    local subcommands="discover list start attach stop status interactive config help"
+    local subcommands="discover list start attach stop status config help"
 
     # Only the first argument (the subcommand) is completed; the subcommands
     # take no further options.

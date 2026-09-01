@@ -14,7 +14,6 @@
 #   attach                Attach to the session (starting it if needed)
 #   stop                  Terminate the session
 #   status                Show whether the session is running
-#   interactive           dialog picker: open a single device with tio
 #   config                Interactively map adapters into devices.conf
 #   help                  Show this help
 #
@@ -47,7 +46,6 @@ export OOB_LIB_DIR
 # ---------------------------------------------------------------------------
 OOB_CONF="${OOB_CONF:-/etc/${PROG}/oob-usb-serial.conf}"
 OOB_DEVICES_CONF="${OOB_DEVICES_CONF:-/etc/${PROG}/devices.conf}"
-OOB_SPEEDS_FILE="${OOB_SPEEDS_FILE:-/usr/share/${PROG}/serial_speeds.txt}"
 
 OOB_DEFAULT_BAUD="115200"
 OOB_DEFAULT_DATA="8"
@@ -56,6 +54,7 @@ OOB_DEFAULT_STOP="1"
 OOB_DEFAULT_FLOW="none"
 OOB_SESSION_NAME="oob"
 OOB_LOG_DIR=""
+OOB_USER="oob"
 OOB_RUNTIME_DIR="/run/${PROG}"
 
 if [ -f "$OOB_CONF" ]; then
@@ -64,15 +63,17 @@ if [ -f "$OOB_CONF" ]; then
 fi
 
 export OOB_DEFAULT_BAUD OOB_DEFAULT_DATA OOB_DEFAULT_PARITY OOB_DEFAULT_STOP \
-       OOB_DEFAULT_FLOW OOB_SESSION_NAME OOB_LOG_DIR OOB_DEVICES_CONF OOB_RUNTIME_DIR
+       OOB_DEFAULT_FLOW OOB_SESSION_NAME OOB_LOG_DIR OOB_USER OOB_DEVICES_CONF OOB_RUNTIME_DIR
 
 # shellcheck source=../lib/discover.sh
 . "${OOB_LIB_DIR}/discover.sh"
 # shellcheck source=../lib/session-gen.sh
 . "${OOB_LIB_DIR}/session-gen.sh"
 
-# tmux is always driven on a dedicated, named socket so the boot service and an
-# interactive SSH login unambiguously share the same server/session.
+# tmux is always driven on a dedicated, named socket. NOTE: `tmux -L NAME` is
+# per-user (the socket lives under the caller's runtime dir), so the session
+# commands must all run as OOB_USER to share the one real server. See
+# _ensure_oob_user below.
 TMUX_SOCKET="oob"
 _tmux() { tmux -L "$TMUX_SOCKET" "$@"; }
 
@@ -81,6 +82,35 @@ _die()  { _err "$*"; exit 1; }
 
 _require() {
     command -v "$1" >/dev/null 2>&1 || _die "required command '$1' not found"
+}
+
+# _ensure_oob_user
+# Session commands (start/stop/attach/status) must act on OOB_USER's tmux
+# server. Because `tmux -L` sockets are per-user, running as anyone else would
+# create or inspect a *different* server. If the caller is not OOB_USER:
+#   * as root -> re-exec the whole command as OOB_USER (runuser, fallback sudo)
+#   * otherwise -> refuse with a clear message.
+# When the caller already is OOB_USER, this is a no-op.
+_ensure_oob_user() {
+    local me
+    me="$(id -un)"
+    [ "$me" = "$OOB_USER" ] && return 0
+
+    if ! getent passwd "$OOB_USER" >/dev/null 2>&1; then
+        _die "user '${OOB_USER}' does not exist (set OOB_USER in ${OOB_CONF})"
+    fi
+
+    if [ "$(id -u)" = "0" ]; then
+        if command -v runuser >/dev/null 2>&1; then
+            exec runuser -u "$OOB_USER" -- "$0" "$@"
+        elif command -v sudo >/dev/null 2>&1; then
+            exec sudo -u "$OOB_USER" -- "$0" "$@"
+        else
+            _die "cannot switch to '${OOB_USER}': neither runuser nor sudo found"
+        fi
+    fi
+
+    _die "run this as '${OOB_USER}' (e.g. via sudo); the session belongs to that user"
 }
 
 # _oob_device_accessible <path>
@@ -246,73 +276,6 @@ cmd_status() {
     return 3
 }
 
-# _oob_menu_from_file <file> -> populates global _MENU array (tag,label pairs)
-# from a one-value-per-line file, skipping comments/blanks.
-cmd_interactive() {
-    _require dialog
-    _require tio
-
-    # --- pick a speed ---
-    local -a speed_menu=()
-    local n=0 line
-    if [ -f "$OOB_SPEEDS_FILE" ]; then
-        while IFS= read -r line || [ -n "$line" ]; do
-            [ -z "${line//[[:space:]]/}" ] && continue
-            case "$line" in \#*) continue ;; esac
-            n=$((n + 1))
-            speed_menu+=( "$n" "$line" )
-        done < "$OOB_SPEEDS_FILE"
-    fi
-    if [ "${#speed_menu[@]}" -eq 0 ]; then
-        speed_menu=( 1 9600 2 19200 3 38400 4 57600 5 115200 )
-    fi
-
-    local choice speed
-    choice="$(dialog --nocancel --keep-tite --menu "Select speed:" 22 76 16 \
-        "${speed_menu[@]}" 2>&1 >/dev/tty)"
-    speed="${speed_menu[$(( choice * 2 - 1 ))]}"
-
-    # --- pick framing parameters (tio vocabulary) ---
-    local sel data parity stop flow
-    sel="$(dialog --nocancel --keep-tite --default-item 8 --menu "Data bits:" 12 50 4 \
-        5 "5" 6 "6" 7 "7" 8 "8" 2>&1 >/dev/tty)"
-    data="$sel"
-    parity="$(dialog --nocancel --keep-tite --default-item none --menu "Parity:" 12 50 3 \
-        none "None" even "Even" odd "Odd" 2>&1 >/dev/tty)"
-    stop="$(dialog --nocancel --keep-tite --default-item 1 --menu "Stop bits:" 12 50 2 \
-        1 "1" 2 "2" 2>&1 >/dev/tty)"
-    flow="$(dialog --nocancel --keep-tite --default-item none --menu "Flow control:" 12 60 3 \
-        none "None" hard "Hardware (RTS/CTS)" soft "Software (XON/XOFF)" 2>&1 >/dev/tty)"
-
-    # --- pick a device (prefer the by-id path) ---
-    local -a dev_menu=() dev_paths=()
-    local raw devnode id_serial vendor model byid
-    raw="$(oob_discover_raw)"
-    [ -z "$raw" ] && _die "no USB serial adapters found"
-    n=0
-    while IFS=$'\t' read -r devnode id_serial vendor model byid; do
-        [ -z "${devnode:-}" ] && continue
-        : "$vendor"
-        n=$((n + 1))
-        dev_menu+=( "$n" "${devnode} [${model}]" )
-        dev_paths+=( "$byid" )
-    done <<< "$raw"
-
-    choice="$(dialog --nocancel --keep-tite --menu "Select device:" 22 76 16 \
-        "${dev_menu[@]}" 2>&1 >/dev/tty)"
-    local device="${dev_paths[$(( choice - 1 ))]}"
-
-    if ! _oob_device_accessible "$device"; then
-        _oob_perm_hint "$device"
-        exit 1
-    fi
-
-    printf 'Opening %s at %s %s...\n' \
-        "$device" "$speed" "$(_oob_framing_summary "$data" "$parity" "$stop" "$flow")"
-    printf 'To leave the session: Ctrl-t q (tio quit).\n'
-    exec tio -b "$speed" -d "$data" -p "$parity" -s "$stop" -f "$flow" "$device"
-}
-
 # _oob_append_section <conf> <name> <id_serial> <baud> <data> <parity> <stop> <flow>
 _oob_append_section() {
     local conf="$1" name="$2" id="$3" baud="$4" data="$5" parity="$6" stop="$7" flow="$8"
@@ -413,7 +376,6 @@ Commands:
   attach        Attach to the session (starting it if needed)
   stop          Terminate the session
   status        Show whether the session is running
-  interactive   dialog picker: open a single device with tio
   config        Interactively map discovered adapters into devices.conf
   help          Show this help
 
@@ -429,6 +391,16 @@ EOF
 
 main() {
     local sub="${1:-help}"
+
+    # Session commands act on OOB_USER's tmux server; ensure we are that user
+    # (re-execing the full command via runuser/sudo when invoked as root).
+    # Done before shifting so the whole original argv is preserved for re-exec.
+    case "$sub" in
+        start|stop|attach|status)
+            _ensure_oob_user "$@"
+            ;;
+    esac
+
     if [ "$#" -gt 0 ]; then
         shift
     fi
@@ -439,7 +411,6 @@ main() {
         attach)      cmd_attach "$@" ;;
         stop)        cmd_stop "$@" ;;
         status)      cmd_status "$@" ;;
-        interactive) cmd_interactive "$@" ;;
         config)      cmd_config "$@" ;;
         help|-h|--help) usage ;;
         *) _err "unknown command: $sub"; usage; exit 2 ;;

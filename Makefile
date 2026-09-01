@@ -32,8 +32,6 @@ install:
 	$(INSTALL_BIN) src/lib/session-gen.sh $(DESTDIR)$(LIBDIR)/session-gen.sh
 
 	# Shared data
-	$(INSTALL) -d $(DESTDIR)$(SHAREDIR)
-	$(INSTALL_DATA) src/share/serial_speeds.txt $(DESTDIR)$(SHAREDIR)/serial_speeds.txt
 	$(INSTALL) -d $(DESTDIR)$(SHAREDIR)/profile
 	$(INSTALL_DATA) src/profile/oob-usb-serial.sh $(DESTDIR)$(SHAREDIR)/profile/oob-usb-serial.sh
 
