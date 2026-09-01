@@ -15,9 +15,6 @@ oob-usb-serial (2.0.0) unstable; urgency=medium
     each user spawning a separate, colliding tmux server.
   * Discovery gains the /dev/serial/by-id path; optional OOB_LOG_DIR enables
     per-console logging.
-  * There is no `interactive` subcommand: a serial port has a single
-    reader/writer, so consoles are only ever opened via the one tmux session
-    (attach with `oob-usb-serial attach`).
   * Dependencies: screen replaced by tio and tmux.
   * Detailed design/configuration in docs/DESIGN.md.
 
