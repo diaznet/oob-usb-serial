@@ -28,13 +28,12 @@ install:
 
 	# Libraries
 	$(INSTALL) -d $(DESTDIR)$(LIBDIR)
-	$(INSTALL_BIN) src/lib/discover.sh     $(DESTDIR)$(LIBDIR)/discover.sh
-	$(INSTALL_BIN) src/lib/screenrc-gen.sh $(DESTDIR)$(LIBDIR)/screenrc-gen.sh
+	$(INSTALL_BIN) src/lib/discover.sh    $(DESTDIR)$(LIBDIR)/discover.sh
+	$(INSTALL_BIN) src/lib/session-gen.sh $(DESTDIR)$(LIBDIR)/session-gen.sh
 
 	# Shared data
 	$(INSTALL) -d $(DESTDIR)$(SHAREDIR)
 	$(INSTALL_DATA) src/share/serial_speeds.txt $(DESTDIR)$(SHAREDIR)/serial_speeds.txt
-	$(INSTALL_DATA) src/share/serial_framings.txt $(DESTDIR)$(SHAREDIR)/serial_framings.txt
 	$(INSTALL) -d $(DESTDIR)$(SHAREDIR)/profile
 	$(INSTALL_DATA) src/profile/oob-usb-serial.sh $(DESTDIR)$(SHAREDIR)/profile/oob-usb-serial.sh
 
@@ -67,7 +66,7 @@ uninstall:
 check:
 	# -x follows sourced libraries; SC1091 is excluded because the runtime
 	# config files (sourced dynamically) do not exist at lint time.
-	shellcheck -x -e SC1091 -s bash src/bin/oob-usb-serial src/lib/discover.sh src/lib/screenrc-gen.sh
+	shellcheck -x -e SC1091 -s bash src/bin/oob-usb-serial src/lib/discover.sh src/lib/session-gen.sh
 	shellcheck -s bash build.sh scripts/build-apt-repo.sh scripts/setup-apt-signing-key.sh
 	shellcheck -s sh src/profile/oob-usb-serial.sh
 

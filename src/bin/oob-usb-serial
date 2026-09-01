@@ -3,20 +3,20 @@
 # oob-usb-serial: out-of-band USB serial console multiplexer
 #
 # Discovers USB-to-serial adapters attached to the host and opens each one as a
-# named window inside a single detached GNU screen session, so the whole set of
-# consoles can be reached over SSH from a Raspberry Pi acting as an OOB jump
-# host.
+# named window inside a single detached tmux session, each window running tio
+# on the adapter's stable /dev/serial/by-id path. The whole set of consoles is
+# then reachable over SSH from a Raspberry Pi acting as an OOB jump host.
 #
 # Subcommands:
-#   discover                 List discovered adapters (raw records)
-#   list                     Human-friendly table of adapters + resolved config
-#   start                    Generate screenrc and start the detached session
-#   attach                   Attach to the session (start it if not running)
-#   stop                     Terminate the session
-#   status                   Show whether the session is running
-#   interactive              dialog picker: open a single device at a chosen speed
-#   config [--generate]      Show/append device mappings; --generate writes the screenrc
-#   help                     Show this help
+#   discover              List discovered adapters (raw tab-separated records)
+#   list                  Human-friendly table of adapters + resolved config
+#   start                 Start the detached tmux session (one window/adapter)
+#   attach                Attach to the session (starting it if needed)
+#   stop                  Terminate the session
+#   status                Show whether the session is running
+#   interactive           dialog picker: open a single device with tio
+#   config                Interactively map adapters into devices.conf
+#   help                  Show this help
 #
 # Configuration:
 #   /etc/oob-usb-serial/oob-usb-serial.conf   global defaults
@@ -29,8 +29,7 @@ set -o pipefail
 PROG="oob-usb-serial"
 
 # ---------------------------------------------------------------------------
-# Locate the library directory. Support both installed layout (/usr/lib/...)
-# and running straight from a checked-out source tree (../lib relative to bin).
+# Locate the library directory (installed layout or source tree).
 # ---------------------------------------------------------------------------
 _self_dir="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 if [ -f "/usr/lib/${PROG}/discover.sh" ]; then
@@ -49,11 +48,14 @@ export OOB_LIB_DIR
 OOB_CONF="${OOB_CONF:-/etc/${PROG}/oob-usb-serial.conf}"
 OOB_DEVICES_CONF="${OOB_DEVICES_CONF:-/etc/${PROG}/devices.conf}"
 OOB_SPEEDS_FILE="${OOB_SPEEDS_FILE:-/usr/share/${PROG}/serial_speeds.txt}"
-OOB_FRAMINGS_FILE="${OOB_FRAMINGS_FILE:-/usr/share/${PROG}/serial_framings.txt}"
 
-OOB_DEFAULT_SPEED="9600"
-OOB_DEFAULT_FRAMING="cs8,-parenb,-cstopb"
+OOB_DEFAULT_BAUD="115200"
+OOB_DEFAULT_DATA="8"
+OOB_DEFAULT_PARITY="none"
+OOB_DEFAULT_STOP="1"
+OOB_DEFAULT_FLOW="none"
 OOB_SESSION_NAME="oob"
+OOB_LOG_DIR=""
 OOB_RUNTIME_DIR="/run/${PROG}"
 
 if [ -f "$OOB_CONF" ]; then
@@ -61,12 +63,18 @@ if [ -f "$OOB_CONF" ]; then
     . "$OOB_CONF"
 fi
 
-export OOB_DEFAULT_SPEED OOB_DEFAULT_FRAMING OOB_SESSION_NAME OOB_DEVICES_CONF
+export OOB_DEFAULT_BAUD OOB_DEFAULT_DATA OOB_DEFAULT_PARITY OOB_DEFAULT_STOP \
+       OOB_DEFAULT_FLOW OOB_SESSION_NAME OOB_LOG_DIR OOB_DEVICES_CONF OOB_RUNTIME_DIR
 
 # shellcheck source=../lib/discover.sh
 . "${OOB_LIB_DIR}/discover.sh"
-# shellcheck source=../lib/screenrc-gen.sh
-. "${OOB_LIB_DIR}/screenrc-gen.sh"
+# shellcheck source=../lib/session-gen.sh
+. "${OOB_LIB_DIR}/session-gen.sh"
+
+# tmux is always driven on a dedicated, named socket so the boot service and an
+# interactive SSH login unambiguously share the same server/session.
+TMUX_SOCKET="oob"
+_tmux() { tmux -L "$TMUX_SOCKET" "$@"; }
 
 _err()  { printf '%s: %s\n' "$PROG" "$*" >&2; }
 _die()  { _err "$*"; exit 1; }
@@ -75,75 +83,24 @@ _require() {
     command -v "$1" >/dev/null 2>&1 || _die "required command '$1' not found"
 }
 
-# _oob_device_accessible <devnode>
-# Returns 0 if the device exists and is readable+writable by this user.
+# _oob_device_accessible <path>
+# Returns 0 if the device (or its symlink target) is readable+writable.
 _oob_device_accessible() {
-    [ -e "$1" ] && [ -r "$1" ] && [ -w "$1" ]
+    local real
+    real="$(readlink -f "$1" 2>/dev/null || printf '%s' "$1")"
+    [ -e "$real" ] && [ -r "$real" ] && [ -w "$real" ]
 }
 
-# _oob_perm_hint <devnode>
-# Print an actionable message explaining how to gain serial access. This is the
-# common failure: the invoking user is not in the 'dialout' group, so screen
-# would open the device and immediately terminate with no useful output.
+# _oob_perm_hint <path>
+# Explain how to gain serial access (join the dialout group).
 _oob_perm_hint() {
-    local dev="$1" grp
-    grp="$(stat -c '%G' "$dev" 2>/dev/null || echo dialout)"
+    local dev="$1" real grp
+    real="$(readlink -f "$dev" 2>/dev/null || printf '%s' "$dev")"
+    grp="$(stat -c '%G' "$real" 2>/dev/null || echo dialout)"
     _err "cannot access ${dev}: permission denied."
     _err "Add your user to the '${grp}' group, then log out and back in:"
     _err "    sudo usermod -aG ${grp} \$USER"
     _err "(the packaged 'oob' user is added to dialout automatically.)"
-}
-
-# _oob_custom_framing
-# Prompt for each serial parameter separately (data bits, parity, stop bits,
-# flow control) via dialog menus and echo the assembled comma-separated stty
-# framing string. Requires dialog.
-_oob_custom_framing() {
-    local sel data parity stop flow
-
-    sel="$(dialog --nocancel --keep-tite --default-item 8 \
-        --menu "Data bits:" 12 50 4 \
-        5 "5" 6 "6" 7 "7" 8 "8" 2>&1 >/dev/tty)"
-    case "$sel" in
-        5) data="cs5" ;; 6) data="cs6" ;; 7) data="cs7" ;; *) data="cs8" ;;
-    esac
-
-    sel="$(dialog --nocancel --keep-tite --default-item none \
-        --menu "Parity:" 12 50 3 \
-        none "None" even "Even" odd "Odd" 2>&1 >/dev/tty)"
-    case "$sel" in
-        even) parity="parenb,-parodd" ;;
-        odd)  parity="parenb,parodd" ;;
-        *)    parity="-parenb" ;;
-    esac
-
-    sel="$(dialog --nocancel --keep-tite --default-item 1 \
-        --menu "Stop bits:" 12 50 2 \
-        1 "1" 2 "2" 2>&1 >/dev/tty)"
-    case "$sel" in
-        2) stop="cstopb" ;; *) stop="-cstopb" ;;
-    esac
-
-    sel="$(dialog --nocancel --keep-tite --default-item none \
-        --menu "Flow control:" 12 60 3 \
-        none "None" rtscts "Hardware (RTS/CTS)" xonxoff "Software (XON/XOFF)" \
-        2>&1 >/dev/tty)"
-    case "$sel" in
-        rtscts)  flow="crtscts" ;;
-        xonxoff) flow="-crtscts,ixon,ixoff" ;;
-        *)       flow="-crtscts,-ixon,-ixoff" ;;
-    esac
-
-    printf '%s,%s,%s,%s' "$data" "$parity" "$stop" "$flow"
-}
-
-_screenrc_path() {
-    mkdir -p "$OOB_RUNTIME_DIR" 2>/dev/null || true
-    if [ -w "$OOB_RUNTIME_DIR" ] || mkdir -p "$OOB_RUNTIME_DIR" 2>/dev/null; then
-        printf '%s/screenrc' "$OOB_RUNTIME_DIR"
-    else
-        printf '%s/oob-usb-serial-screenrc.%s' "${TMPDIR:-/tmp}" "$(id -u)"
-    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -162,111 +119,149 @@ cmd_list() {
         return 0
     fi
 
-    printf '%-14s %-12s %-8s %-10s %s\n' "DEVICE" "NAME" "BAUD" "FRAMING" "ID_SERIAL"
-    printf '%-14s %-12s %-8s %-10s %s\n' "------" "----" "----" "-------" "---------"
+    printf '%-12s %-13s %-8s %-7s %-40s %s\n' \
+        "NAME" "DEVICE" "BAUD" "FRAMING" "BY-ID" "ID_SERIAL"
+    printf '%-12s %-13s %-8s %-7s %-40s %s\n' \
+        "----" "------" "----" "-------" "-----" "---------"
 
-    local devnode id_serial vendor model cfg name baud framing
-    while IFS=$'\t' read -r devnode id_serial vendor model; do
+    local devnode id_serial vendor model byid cfg name baud data parity stop flow summary
+    while IFS=$'\t' read -r devnode id_serial vendor model byid; do
         [ -z "${devnode:-}" ] && continue
-        : "$vendor" "$model"   # read for field alignment; not displayed here
+        : "$vendor" "$model"
         cfg="$(_oob_lookup_config "$id_serial")"
         if [ -n "$cfg" ]; then
-            IFS='|' read -r name baud framing <<< "$cfg"
+            IFS='|' read -r name baud data parity stop flow <<< "$cfg"
         else
             name="(auto)"
-            baud="$OOB_DEFAULT_SPEED"
-            framing="$OOB_DEFAULT_FRAMING"
+            baud="$OOB_DEFAULT_BAUD"; data="$OOB_DEFAULT_DATA"
+            parity="$OOB_DEFAULT_PARITY"; stop="$OOB_DEFAULT_STOP"; flow="$OOB_DEFAULT_FLOW"
         fi
-        printf '%-14s %-12s %-8s %-10s %s\n' \
-            "$devnode" "$name" "$baud" "$framing" "$id_serial"
+        summary="$(_oob_framing_summary "$data" "$parity" "$stop" "$flow")"
+        printf '%-12s %-13s %-8s %-7s %-40s %s\n' \
+            "$name" "$devnode" "$baud" "$summary" "$byid" "$id_serial"
     done <<< "$raw"
 }
 
 _session_running() {
-    _require screen
-    screen -ls 2>/dev/null | grep -qE "[0-9]+\.${OOB_SESSION_NAME}[[:space:]]"
+    _tmux has-session -t "$OOB_SESSION_NAME" 2>/dev/null
 }
 
 cmd_start() {
-    _require screen
+    _require tmux
+    _require tio
     if _session_running; then
         _err "session '${OOB_SESSION_NAME}' already running (use 'attach' or 'stop')"
         return 0
     fi
 
-    local rc
-    rc="$(_screenrc_path)"
-    if ! oob_generate_screenrc > "$rc"; then
+    local raw
+    raw="$(oob_discover_raw)"
+    if [ -z "$raw" ]; then
         _err "no adapters discovered; not starting an empty session"
         return 1
     fi
 
-    # Warn about any adapters this user cannot open. Their screen windows would
-    # otherwise appear then die with no explanation. Non-fatal: the session may
-    # still be useful for the accessible devices.
-    local devnode inaccessible=0
-    while IFS= read -r devnode; do
-        [ -z "$devnode" ] && continue
-        if ! _oob_device_accessible "$devnode"; then
-            inaccessible=$((inaccessible + 1))
-            _err "warning: cannot access ${devnode} (its console window will not stay open)"
-        fi
-    done < <(oob_discover_devnodes)
-    if [ "$inaccessible" -gt 0 ]; then
-        local anydev
-        anydev="$(oob_discover_devnodes | head -1)"
-        _oob_perm_hint "${anydev:-/dev/ttyUSB0}"
+    if [ -n "$OOB_LOG_DIR" ]; then
+        mkdir -p "$OOB_LOG_DIR" 2>/dev/null \
+            || _err "warning: could not create log dir ${OOB_LOG_DIR}"
     fi
 
-    # Start detached, named session using the generated screenrc.
-    screen -dmS "$OOB_SESSION_NAME" -c "$rc"
-    _err "started detached session '${OOB_SESSION_NAME}' (attach with: $PROG attach)"
+    local tmuxconf
+    tmuxconf="$(oob_tmux_config_path)"
+    oob_generate_tmux_config > "$tmuxconf"
+
+    local devnode id_serial vendor model byid cfg name baud data parity stop flow
+    local first=1 windows=0 inaccessible=0
+    while IFS=$'\t' read -r devnode id_serial vendor model byid; do
+        [ -z "${devnode:-}" ] && continue
+        : "$vendor" "$model"
+
+        cfg="$(_oob_lookup_config "$id_serial")"
+        if [ -n "$cfg" ]; then
+            IFS='|' read -r name baud data parity stop flow <<< "$cfg"
+        else
+            name="$(_oob_sanitize_name "${model:-serial}_${id_serial}")"
+            name="${name:0:24}"
+            baud="$OOB_DEFAULT_BAUD"; data="$OOB_DEFAULT_DATA"
+            parity="$OOB_DEFAULT_PARITY"; stop="$OOB_DEFAULT_STOP"; flow="$OOB_DEFAULT_FLOW"
+        fi
+
+        if ! _oob_device_accessible "$byid"; then
+            inaccessible=$((inaccessible + 1))
+            _err "warning: cannot access ${byid} (its console window may not stay open)"
+        fi
+
+        local tio_cmd
+        tio_cmd="$(_oob_tio_command "$name" "$byid" "$baud" "$data" "$parity" "$stop" "$flow")"
+
+        if [ "$first" -eq 1 ]; then
+            _tmux -f "$tmuxconf" new-session -d -s "$OOB_SESSION_NAME" -n "$name" "$tio_cmd"
+            first=0
+        else
+            _tmux new-window -t "$OOB_SESSION_NAME" -n "$name" "$tio_cmd"
+        fi
+        windows=$((windows + 1))
+    done <<< "$raw"
+
+    if [ "$windows" -eq 0 ]; then
+        _err "no adapters opened; not starting an empty session"
+        return 1
+    fi
+
+    _tmux select-window -t "$OOB_SESSION_NAME:0" 2>/dev/null || true
+
+    if [ "$inaccessible" -gt 0 ]; then
+        local anydev
+        anydev="$(oob_discover_raw | awk -F '\t' 'NF{print $5; exit}')"
+        _oob_perm_hint "${anydev:-/dev/ttyUSB0}"
+    fi
+    _err "started detached session '${OOB_SESSION_NAME}' with ${windows} console(s) (attach with: $PROG attach)"
 }
 
 cmd_attach() {
-    _require screen
+    _require tmux
     if ! _session_running; then
         cmd_start
     fi
-    # -R reattaches if possible, otherwise creates; -S targets our session.
-    exec screen -R -S "$OOB_SESSION_NAME"
+    exec tmux -L "$TMUX_SOCKET" attach-session -t "$OOB_SESSION_NAME"
 }
 
 cmd_stop() {
-    _require screen
+    _require tmux
     if ! _session_running; then
         _err "session '${OOB_SESSION_NAME}' is not running"
         return 0
     fi
-    screen -S "$OOB_SESSION_NAME" -X quit
+    _tmux kill-session -t "$OOB_SESSION_NAME"
     _err "stopped session '${OOB_SESSION_NAME}'"
 }
 
 cmd_status() {
     if _session_running; then
         printf "session '%s': running\n" "$OOB_SESSION_NAME"
-        screen -ls 2>/dev/null | grep -E "[0-9]+\.${OOB_SESSION_NAME}[[:space:]]" || true
+        _tmux list-windows -t "$OOB_SESSION_NAME" 2>/dev/null || true
         return 0
     fi
     printf "session '%s': not running\n" "$OOB_SESSION_NAME"
     return 3
 }
 
+# _oob_menu_from_file <file> -> populates global _MENU array (tag,label pairs)
+# from a one-value-per-line file, skipping comments/blanks.
 cmd_interactive() {
     _require dialog
-    _require screen
+    _require tio
 
     # --- pick a speed ---
-    local speeds_file="$OOB_SPEEDS_FILE"
-    [ -f "$speeds_file" ] || speeds_file=""
     local -a speed_menu=()
     local n=0 line
-    if [ -n "$speeds_file" ]; then
+    if [ -f "$OOB_SPEEDS_FILE" ]; then
         while IFS= read -r line || [ -n "$line" ]; do
             [ -z "${line//[[:space:]]/}" ] && continue
+            case "$line" in \#*) continue ;; esac
             n=$((n + 1))
             speed_menu+=( "$n" "$line" )
-        done < "$speeds_file"
+        done < "$OOB_SPEEDS_FILE"
     fi
     if [ "${#speed_menu[@]}" -eq 0 ]; then
         speed_menu=( 1 9600 2 19200 3 38400 4 57600 5 115200 )
@@ -277,108 +272,64 @@ cmd_interactive() {
         "${speed_menu[@]}" 2>&1 >/dev/tty)"
     speed="${speed_menu[$(( choice * 2 - 1 ))]}"
 
-    # --- pick a framing preset ---
-    # Presets come from OOB_FRAMINGS_FILE (label|stty-options per line) so they
-    # can be edited without touching this script. Parallel arrays keep the menu
-    # label and the underlying stty options in step.
-    local -a fr_menu=() fr_opts=()
-    local fr_label fr_opt
-    if [ -f "$OOB_FRAMINGS_FILE" ]; then
-        n=0
-        while IFS= read -r line || [ -n "$line" ]; do
-            line="${line%%#*}"
-            [ -z "${line//[[:space:]]/}" ] && continue
-            fr_label="${line%%|*}"
-            fr_opt="${line#*|}"
-            # Trim surrounding whitespace.
-            fr_label="$(printf '%s' "$fr_label" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
-            fr_opt="$(printf '%s' "$fr_opt" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
-            [ -z "$fr_label" ] && continue
-            n=$((n + 1))
-            fr_menu+=( "$n" "$fr_label" )
-            fr_opts+=( "$fr_opt" )
-        done < "$OOB_FRAMINGS_FILE"
-    fi
-    if [ "${#fr_menu[@]}" -eq 0 ]; then
-        fr_menu=( 1 "8N1 (no flow control)" )
-        fr_opts=( "cs8,-parenb,-cstopb" )
-    fi
+    # --- pick framing parameters (tio vocabulary) ---
+    local sel data parity stop flow
+    sel="$(dialog --nocancel --keep-tite --default-item 8 --menu "Data bits:" 12 50 4 \
+        5 "5" 6 "6" 7 "7" 8 "8" 2>&1 >/dev/tty)"
+    data="$sel"
+    parity="$(dialog --nocancel --keep-tite --default-item none --menu "Parity:" 12 50 3 \
+        none "None" even "Even" odd "Odd" 2>&1 >/dev/tty)"
+    stop="$(dialog --nocancel --keep-tite --default-item 1 --menu "Stop bits:" 12 50 2 \
+        1 "1" 2 "2" 2>&1 >/dev/tty)"
+    flow="$(dialog --nocancel --keep-tite --default-item none --menu "Flow control:" 12 60 3 \
+        none "None" hard "Hardware (RTS/CTS)" soft "Software (XON/XOFF)" 2>&1 >/dev/tty)"
 
-    # Offer a "Custom" entry (tag 0) alongside the presets so any combination
-    # of parameters can be chosen without a matching preset.
-    local framing
-    choice="$(dialog --nocancel --keep-tite --menu "Select framing:" 22 76 16 \
-        0 "Custom (choose each parameter)" \
-        "${fr_menu[@]}" 2>&1 >/dev/tty)"
-    if [ "$choice" = "0" ]; then
-        framing="$(_oob_custom_framing)"
-    else
-        # fr_opts is 0-indexed; the preset menu tags are 1-based.
-        framing="${fr_opts[$(( choice - 1 ))]}"
-    fi
-
-    # --- pick a device ---
-    local -a dev_menu=()
-    local raw devnode id_serial vendor model
+    # --- pick a device (prefer the by-id path) ---
+    local -a dev_menu=() dev_paths=()
+    local raw devnode id_serial vendor model byid
     raw="$(oob_discover_raw)"
     [ -z "$raw" ] && _die "no USB serial adapters found"
     n=0
-    while IFS=$'\t' read -r devnode id_serial vendor model; do
+    while IFS=$'\t' read -r devnode id_serial vendor model byid; do
         [ -z "${devnode:-}" ] && continue
+        : "$vendor"
         n=$((n + 1))
-        dev_menu+=( "$n" "${devnode} [${model}/${id_serial}]" )
+        dev_menu+=( "$n" "${devnode} [${model}]" )
+        dev_paths+=( "$byid" )
     done <<< "$raw"
 
     choice="$(dialog --nocancel --keep-tite --menu "Select device:" 22 76 16 \
         "${dev_menu[@]}" 2>&1 >/dev/tty)"
-    # Extract the /dev node (first field of the label).
-    local label device
-    label="${dev_menu[$(( choice * 2 - 1 ))]}"
-    device="${label%% *}"
+    local device="${dev_paths[$(( choice - 1 ))]}"
 
-    # Pre-flight: if we can't open the device, screen would just terminate
-    # silently. Fail early with an actionable message instead.
     if ! _oob_device_accessible "$device"; then
         _oob_perm_hint "$device"
         exit 1
     fi
 
-    # Apply the chosen framing to the tty before screen attaches. screen sets
-    # the baud rate; stty handles data bits / parity / stop bits / flow control.
-    local stty_args
-    stty_args="$(printf '%s' "$framing" | tr ',' ' ')"
-    if [ -n "$stty_args" ]; then
-        # shellcheck disable=SC2086  # intentional word-splitting of stty opts
-        stty -F "$device" "$speed" $stty_args 2>/dev/null \
-            || _err "warning: could not fully apply framing '${framing}' to ${device}"
-    fi
-
-    printf 'Opening %s at %s baud (%s)...\n' "$device" "$speed" "$framing"
-    printf 'To leave the session: Ctrl-a k (kill) or Ctrl-a \\ (quit).\n'
-    exec screen "$device" "$speed"
+    printf 'Opening %s at %s %s...\n' \
+        "$device" "$speed" "$(_oob_framing_summary "$data" "$parity" "$stop" "$flow")"
+    printf 'To leave the session: Ctrl-t q (tio quit).\n'
+    exec tio -b "$speed" -d "$data" -p "$parity" -s "$stop" -f "$flow" "$device"
 }
 
-# _oob_append_section <conf> <name> <id_serial> <baud> <framing>
-# Append one INI device section, creating the file if needed.
+# _oob_append_section <conf> <name> <id_serial> <baud> <data> <parity> <stop> <flow>
 _oob_append_section() {
-    local conf="$1" name="$2" id="$3" baud="$4" framing="$5"
+    local conf="$1" name="$2" id="$3" baud="$4" data="$5" parity="$6" stop="$7" flow="$8"
     {
         printf '\n[%s]\n' "$name"
-        printf 'match   = %s\n' "$id"
-        printf 'baud    = %s\n' "$baud"
-        printf 'framing = %s\n' "$framing"
+        printf 'match  = %s\n' "$id"
+        printf 'baud   = %s\n' "$baud"
+        printf 'data   = %s\n' "$data"
+        printf 'parity = %s\n' "$parity"
+        printf 'stop   = %s\n' "$stop"
+        printf 'flow   = %s\n' "$flow"
     } >> "$conf"
 }
 
-# Interactive scaffolder: walk each discovered adapter and, for the ones not
-# already mapped, prompt for a window name / baud / framing and append an INI
-# section to devices.conf. Non-interactive `--generate` dumps the screenrc.
+# Interactive scaffolder: for each unmapped adapter, prompt for name + serial
+# line settings and append an INI section to devices.conf.
 cmd_config() {
-    if [ "${1:-}" = "--generate" ]; then
-        oob_generate_screenrc
-        return $?
-    fi
-
     local raw
     raw="$(oob_discover_raw)"
     if [ -z "$raw" ]; then
@@ -386,7 +337,6 @@ cmd_config() {
         return 0
     fi
 
-    # Ensure we can write the config (it usually lives under /etc).
     if [ -e "$OOB_DEVICES_CONF" ] && [ ! -w "$OOB_DEVICES_CONF" ]; then
         _die "cannot write ${OOB_DEVICES_CONF} (re-run with sudo)"
     fi
@@ -399,13 +349,11 @@ cmd_config() {
     printf 'Configuring device mappings in %s\n' "$OOB_DEVICES_CONF"
     printf 'Press Enter to accept the [default], or type "s" to skip a device.\n\n'
 
-    # Read discovery records on FD 3 so interactive prompts can use stdin (FD 0)
-    # without the loop and `read` competing for the same input.
-    local devnode id_serial vendor model existing added=0
-    while IFS=$'\t' read -r -u 3 devnode id_serial vendor model; do
+    local devnode id_serial vendor model byid existing added=0
+    while IFS=$'\t' read -r -u 3 devnode id_serial vendor model byid; do
         [ -z "${devnode:-}" ] && continue
+        : "$vendor" "$byid"
 
-        # Skip adapters already covered by an existing mapping.
         existing="$(_oob_lookup_config "$id_serial")"
         if [ -n "$existing" ]; then
             printf '  %s [%s] -> already mapped as "%s", skipping.\n' \
@@ -415,10 +363,8 @@ cmd_config() {
 
         printf '  Device: %s\n    model=%s serial=%s\n' "$devnode" "$model" "$id_serial"
 
-        # Default window name derived from model/serial.
-        local def_name reply name baud framing
-        def_name="$(printf '%s' "${model:-serial}_${id_serial}" \
-            | tr -c 'A-Za-z0-9_.-' '_' | sed 's/__*/_/g; s/^_//; s/_$//')"
+        local def_name reply name baud data parity stop flow
+        def_name="$(_oob_sanitize_name "${model:-serial}_${id_serial}")"
         def_name="${def_name:0:24}"
 
         printf '    name [%s] (or "s" to skip): ' "$def_name"
@@ -429,15 +375,19 @@ cmd_config() {
             *) name="$reply" ;;
         esac
 
-        printf '    baud [%s]: ' "$OOB_DEFAULT_SPEED"
-        read -r reply || reply=""
-        baud="${reply:-$OOB_DEFAULT_SPEED}"
+        printf '    baud [%s]: ' "$OOB_DEFAULT_BAUD"
+        read -r reply || reply=""; baud="${reply:-$OOB_DEFAULT_BAUD}"
+        printf '    data bits [%s]: ' "$OOB_DEFAULT_DATA"
+        read -r reply || reply=""; data="${reply:-$OOB_DEFAULT_DATA}"
+        printf '    parity (none/odd/even) [%s]: ' "$OOB_DEFAULT_PARITY"
+        read -r reply || reply=""; parity="${reply:-$OOB_DEFAULT_PARITY}"
+        printf '    stop bits [%s]: ' "$OOB_DEFAULT_STOP"
+        read -r reply || reply=""; stop="${reply:-$OOB_DEFAULT_STOP}"
+        printf '    flow (none/soft/hard) [%s]: ' "$OOB_DEFAULT_FLOW"
+        read -r reply || reply=""; flow="${reply:-$OOB_DEFAULT_FLOW}"
 
-        printf '    framing [%s]: ' "$OOB_DEFAULT_FRAMING"
-        read -r reply || reply=""
-        framing="${reply:-$OOB_DEFAULT_FRAMING}"
-
-        _oob_append_section "$OOB_DEVICES_CONF" "$name" "$id_serial" "$baud" "$framing"
+        _oob_append_section "$OOB_DEVICES_CONF" "$name" "$id_serial" \
+            "$baud" "$data" "$parity" "$stop" "$flow"
         added=$((added + 1))
         printf '    added [%s] (match = %s)\n\n' "$name" "$id_serial"
     done 3<<< "$raw"
@@ -452,21 +402,24 @@ cmd_config() {
 
 usage() {
     cat <<EOF
-${PROG} - out-of-band USB serial console multiplexer
+${PROG} - out-of-band USB serial console multiplexer (tio + tmux)
 
 Usage: ${PROG} <command> [args]
 
 Commands:
-  discover              List discovered adapters (raw tab-separated records)
-  list                  Human-friendly table of adapters + resolved config
-  start                 Start the detached screen session (one window/adapter)
-  attach                Attach to the session (starting it if needed)
-  stop                  Terminate the session
-  status                Show whether the session is running
-  interactive           dialog picker: open a single device at a chosen speed
-  config                Interactively map discovered adapters into devices.conf
-  config --generate     Print the generated screenrc (no changes made)
-  help                  Show this help
+  discover      List discovered adapters (raw tab-separated records)
+  list          Human-friendly table of adapters + resolved config
+  start         Start the detached tmux session (one window/adapter)
+  attach        Attach to the session (starting it if needed)
+  stop          Terminate the session
+  status        Show whether the session is running
+  interactive   dialog picker: open a single device with tio
+  config        Interactively map discovered adapters into devices.conf
+  help          Show this help
+
+In the tmux session: Ctrl-b n/p switch consoles, Ctrl-b w lists them,
+Ctrl-b d detaches, Ctrl-b R relaunches a closed console. Inside a console,
+tio quits with Ctrl-t q.
 
 Config:
   ${OOB_CONF}

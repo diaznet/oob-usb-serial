@@ -18,7 +18,7 @@
 
 Plug a set of USB-to-serial adapters into a Debian host through a USB hub, cable
 each adapter to the console port of a switch, router or server, and
-`oob-usb-serial` exposes every console at once from one detached GNU `screen`
+`oob-usb-serial` exposes every console at once from one detached `tmux`
 session — reachable over SSH.
 
 ## How it works
@@ -27,9 +27,14 @@ session — reachable over SSH.
    adapter's *stable* serial identifier (`ID_SERIAL`) rather than its
    `/dev/ttyUSBx` node, which can change across reboots and replugs.
 2. **Resolve** each adapter against an optional per-device config (friendly
-   name, baud rate, serial framing). Unmapped adapters use global defaults.
-3. **Open** all adapters as named windows inside one detached GNU `screen`
-   session, so `screen -r oob` (or an SSH login) drops you into all consoles.
+   name, baud rate, framing). Unmapped adapters use global defaults.
+3. **Open** all adapters as named windows in one detached `tmux` session, each
+   running [`tio`](https://tio.github.io) on the adapter's stable
+   `/dev/serial/by-id/*` path (so it auto-reconnects across replugs). An SSH
+   login (or `oob-usb-serial attach`) drops you into all consoles.
+
+See [docs/DESIGN.md](docs/DESIGN.md) for the architecture, full configuration
+reference, and packaging/upgrade details.
 
 ## Hardware
 
@@ -107,7 +112,7 @@ install it. Use `apt install ./file.deb` (not `dpkg -i`) so the runtime
 dependencies resolve automatically:
 
 ```sh
-ver=1.0.0
+ver=2.0.0
 wget "https://github.com/diaznet/oob-usb-serial/releases/download/v${ver}/oob-usb-serial_${ver}_all.deb"
 sudo apt install "./oob-usb-serial_${ver}_all.deb"
 ```
@@ -118,12 +123,13 @@ Dependency handling is declarative — nothing is bundled or vendored:
 
 | Kind | Packages | Managed by |
 |------|----------|------------|
-| Runtime (required) | `screen`, `udev`, `adduser` | `Depends:` in the package; `apt` installs them |
+| Runtime (required) | `tio`, `tmux`, `udev`, `adduser` | `Depends:` in the package; `apt` installs them |
 | Runtime (optional) | `dialog` (only for interactive mode) | `Recommends:` in the package |
 | Build-time only | `dpkg-dev`, `debhelper`, `fakeroot` | installed by CI / your build host |
 
 There is no language runtime dependency (no Python/Node): the tool is `bash`
-plus standard coreutils and `stty`, which are always present.
+plus `tio` and `tmux`. `tio` is available on Debian 11+ and recent Raspberry
+Pi OS.
 
 ## Usage
 
@@ -133,33 +139,27 @@ oob-usb-serial start         # start the detached session (one window/adapter)
 oob-usb-serial attach        # attach to the session (starts it if needed)
 oob-usb-serial status        # is the session running?
 oob-usb-serial stop          # tear the session down
-oob-usb-serial interactive   # dialog picker: speed, framing, then device
+oob-usb-serial interactive   # dialog picker: speed + framing, then device
 sudo oob-usb-serial config   # interactively map adapters into devices.conf
 ```
 
 `config` walks each attached adapter that isn't already mapped and prompts for a
-window name, baud rate and framing, then appends the matching INI section to
-`devices.conf` for you (matched by the adapter's exact `ID_SERIAL`). It needs
-root to write under `/etc`. Use `oob-usb-serial config --generate` to just print
-the generated screenrc without changing anything.
+window name, baud rate, data bits, parity, stop bits and flow control, then
+appends the matching INI section to `devices.conf` (matched by the adapter's
+exact `ID_SERIAL`). It needs root to write under `/etc`.
 
-Inside the shared `screen` session (`start`/`attach`): `Ctrl-a n` / `Ctrl-a p`
-switch consoles, `Ctrl-a "` lists them, `Ctrl-a d` detaches.
+Inside the `tmux` session (`start`/`attach`): `Ctrl-b n` / `Ctrl-b p` switch
+consoles, `Ctrl-b w` lists them, `Ctrl-b d` detaches, and `Ctrl-b R` relaunches
+a console that has closed. Inside a console, `tio` quits with `Ctrl-t q`.
 
-`interactive` prompts for a baud rate, a **framing**, and the device, then opens
-it in a plain `screen` session; leave it with `Ctrl-a k` (kill the window) or
-`Ctrl-a \` (quit screen). For framing you can either pick a **preset**, or
-choose **Custom** to set data bits, parity, stop bits and flow control
-individually. The presets are read from
-`/usr/share/oob-usb-serial/serial_framings.txt` (`label|stty-options` per
-line) — edit that file to add or change presets.
+`interactive` prompts for a baud rate and the framing (data bits, parity, stop
+bits, flow control), then opens a single device with `tio`; quit it with
+`Ctrl-t q`.
 
 ### Serial device permissions
 
 Serial adapters (`/dev/ttyUSB*`) are owned by the `dialout` group. A user must
-be in that group to open them — otherwise `screen` opens the port and exits
-immediately (`[screen is terminating]`). The commands detect this and print a
-hint.
+be in that group to open them. The commands detect this and print a hint.
 
 - The packaged **`oob`** user is added to `dialout` automatically at install
   time, so the boot service and login integration work out of the box.
@@ -178,8 +178,8 @@ Running under `sudo` also works but is discouraged for an interactive session.
 The package ships a bash completion script to
 `/usr/share/bash-completion/completions/oob-usb-serial`. With the
 `bash-completion` package installed, `oob-usb-serial <Tab>` completes the
-subcommands (and `--generate` after `config`). It activates in new shells; to
-enable it in the current shell without re-login:
+subcommands. It activates in new shells; to enable it in the current shell
+without re-login:
 
 ```sh
 source /usr/share/bash-completion/completions/oob-usb-serial
@@ -187,54 +187,30 @@ source /usr/share/bash-completion/completions/oob-usb-serial
 
 ## Configuration
 
-### Global defaults — `/etc/oob-usb-serial/oob-usb-serial.conf`
+Global defaults live in `/etc/oob-usb-serial/oob-usb-serial.conf`
+(`OOB_DEFAULT_BAUD/DATA/PARITY/STOP/FLOW`, `OOB_SESSION_NAME`, `OOB_USER`, and
+an optional `OOB_LOG_DIR` for per-console logging).
 
-```sh
-OOB_DEFAULT_SPEED="9600"
-OOB_DEFAULT_FRAMING="cs8,-parenb,-cstopb"   # 8N1
-OOB_SESSION_NAME="oob"
-OOB_USER="oob"
-```
-
-### Per-device mapping — `/etc/oob-usb-serial/devices.conf`
-
-An INI file. Each `[section]` defines one device, and **the section name is the
-`screen` window title**. Match adapters by their `ID_SERIAL` (see
-`oob-usb-serial list`). The file may be left empty — every adapter then opens at
-the global defaults.
+Per-device settings go in `/etc/oob-usb-serial/devices.conf` — an INI file where
+each `[section]` is one device and the section name is its `tmux` window title.
+Match adapters by their `ID_SERIAL` (see `oob-usb-serial list`):
 
 ```ini
 [device1]
-match   = *FT232R*_A5069RR4
-baud    = 9600
-framing = cs8,-parenb,-cstopb
-
-[device2]
-match   = *Prolific*
-baud    = 38400
-framing = cs8,parenb,cstopb,crtscts
-
-[device3]
-match   = *CP2102*
-baud    = 115200
-; framing omitted -> uses OOB_DEFAULT_FRAMING
+match  = *FT232R*_A5069RR4
+baud   = 9600
+data   = 8
+parity = none
+stop   = 1
+flow   = none
 ```
 
-| Key | Meaning | Required |
-|-----|---------|----------|
-| `match` | shell glob matched against the adapter's udev `ID_SERIAL` | yes |
-| `baud` | baud rate (e.g. `9600`, `115200`) | no — falls back to `OOB_DEFAULT_SPEED` |
-| `framing` | comma-separated `stty` options | no — falls back to `OOB_DEFAULT_FRAMING` |
+Keys `data`/`parity`/`stop`/`flow` use `tio`'s vocabulary (`parity`:
+none/odd/even, `flow`: none/soft/hard). Any omitted key falls back to the
+global default, and the file may be left empty. Both config files are dpkg
+*conffiles*, so your edits survive upgrades.
 
-Sections are matched in file order; the first section whose `match` glob fits an
-adapter wins. Comments start with `#` or `;`.
-
-Framing is a comma-separated list of `stty` options: `cs7`/`cs8` data bits,
-`parenb`/`-parenb` parity, `cstopb`/`-cstopb` stop bits, `crtscts` for hardware
-flow control.
-
-Both config files are registered as dpkg *conffiles*, so your edits survive
-package upgrades.
+Full reference: [docs/DESIGN.md](docs/DESIGN.md).
 
 ## Boot and login integration
 
@@ -356,7 +332,7 @@ make check     # runs shellcheck
 ```
 src/bin/oob-usb-serial          # main CLI
 src/lib/discover.sh             # udev-based adapter discovery
-src/lib/screenrc-gen.sh         # config -> screenrc generator
+src/lib/session-gen.sh          # config -> tio commands + tmux session/config
 src/etc/*.conf                  # default + example configuration
 src/systemd/*.service           # boot-time service unit
 src/profile/oob-usb-serial.sh   # opt-in login auto-attach snippet

@@ -10,7 +10,8 @@ Rules-Requires-Root: no
 Package: oob-usb-serial
 Architecture: all
 Depends: ${misc:Depends},
-         screen,
+         tio,
+         tmux,
          udev,
          adduser
 Recommends: dialog,
@@ -22,10 +23,10 @@ Description: Out-of-band USB serial console multiplexer
  .
  It discovers every attached USB-to-serial adapter, matches each one against an
  optional per-device configuration keyed by its stable udev serial identifier,
- and opens all of them as named windows inside a single detached GNU screen
- session. Baud rate and full serial framing (data bits, parity, stop bits and
- flow control) are configurable per device, with sensible global defaults for
- adapters that are not explicitly mapped.
+ and opens all of them as named windows inside a single detached tmux session,
+ each running tio on the adapter's stable /dev/serial/by-id path. Baud rate,
+ data bits, parity, stop bits and flow control are configurable per device,
+ with sensible global defaults for adapters that are not explicitly mapped.
  .
  A systemd service can bring the session up at boot, and an opt-in login
  snippet attaches a dedicated user straight into the consoles on SSH login.
