@@ -138,6 +138,7 @@ oob-usb-serial start         # start the detached session (one window/adapter)
 oob-usb-serial attach        # attach to the session (starts it if needed)
 oob-usb-serial status        # is the session running?
 oob-usb-serial stop          # tear the session down
+oob-usb-serial restart       # stop then start
 sudo oob-usb-serial config   # map adapters into devices.conf
 ```
 

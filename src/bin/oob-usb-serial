@@ -13,6 +13,7 @@
 #   start                 Start the detached tmux session (one window/adapter)
 #   attach                Attach to the session (starting it if needed)
 #   stop                  Terminate the session
+#   restart               Stop then start the session
 #   status                Show whether the session is running
 #   config                Map discovered adapters into devices.conf
 #   help                  Show this help
@@ -266,6 +267,13 @@ cmd_stop() {
     _err "stopped session '${OOB_SESSION_NAME}'"
 }
 
+cmd_restart() {
+    if _session_running; then
+        cmd_stop
+    fi
+    cmd_start
+}
+
 cmd_status() {
     if _session_running; then
         printf "session '%s': running\n" "$OOB_SESSION_NAME"
@@ -375,6 +383,7 @@ Commands:
   start         Start the detached tmux session (one window/adapter)
   attach        Attach to the session (starting it if needed)
   stop          Terminate the session
+  restart       Stop then start the session
   status        Show whether the session is running
   config        Map discovered adapters into devices.conf
   help          Show this help
@@ -396,7 +405,7 @@ main() {
     # (re-execing the full command via runuser/sudo when invoked as root).
     # Done before shifting so the whole original argv is preserved for re-exec.
     case "$sub" in
-        start|stop|attach|status)
+        start|stop|restart|attach|status)
             _ensure_oob_user "$@"
             ;;
     esac
@@ -410,6 +419,7 @@ main() {
         start)       cmd_start "$@" ;;
         attach)      cmd_attach "$@" ;;
         stop)        cmd_stop "$@" ;;
+        restart)     cmd_restart "$@" ;;
         status)      cmd_status "$@" ;;
         config)      cmd_config "$@" ;;
         help|-h|--help) usage ;;
