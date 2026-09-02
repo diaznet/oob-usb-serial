@@ -1,3 +1,25 @@
+oob-usb-serial (2.0.0) unstable; urgency=medium
+
+  * Major refactor from GNU screen to tio + tmux.
+    - tmux (dedicated socket) is the multiplexer: one detached session with one
+      named window per adapter; remain-on-exit keeps closed consoles visible;
+      Ctrl-b R respawns a console.
+    - tio is the serial client per window, launched on the adapter's stable
+      /dev/serial/by-id path for correct auto-reconnect across replugs.
+  * BREAKING: devices.conf replaces the stty-style `framing` key with tio-native
+    per-device keys data/parity/stop/flow; global defaults become
+    OOB_DEFAULT_BAUD/DATA/PARITY/STOP/FLOW. Legacy `framing` keys are ignored.
+  * Session commands (start/stop/attach/status) always act on the OOB_USER's
+    tmux server. `tmux -L` sockets are per-user, so the CLI re-executes itself
+    as OOB_USER when invoked as root (runuser, fallback sudo -u); this prevents
+    each user spawning a separate, colliding tmux server.
+  * Discovery gains the /dev/serial/by-id path; optional OOB_LOG_DIR enables
+    per-console logging.
+  * Dependencies: screen replaced by tio and tmux.
+  * Detailed design/configuration in docs/DESIGN.md.
+
+ -- diaznet <diaznet@users.noreply.github.com>  Tue, 01 Sep 2026 12:00:00 +0000
+
 oob-usb-serial (1.0.3) unstable; urgency=medium
 
   * interactive: add a framing menu applied via stty before the console opens.

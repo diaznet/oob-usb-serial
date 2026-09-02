@@ -6,6 +6,6 @@
 *.1             text eol=lf
 Makefile        text eol=lf
 debian/*        text eol=lf
-serial_speeds.txt text eol=lf
-# The main CLI has no extension; force LF.
+# Files without a matching extension; force LF.
 src/bin/oob-usb-serial text eol=lf
+src/completion/oob-usb-serial text eol=lf

@@ -14,25 +14,15 @@ _oob_usb_serial() {
         cword="$COMP_CWORD"
     fi
 
-    local subcommands="discover list start attach stop status interactive config help"
+    local subcommands="discover list start attach stop restart status config help"
 
-    # First argument: complete the subcommand.
+    # Only the first argument (the subcommand) is completed; the subcommands
+    # take no further options.
     if [ "${cword:-$COMP_CWORD}" -eq 1 ]; then
         mapfile -t COMPREPLY < <(compgen -W "$subcommands" -- "$cur")
-        return 0
+    else
+        COMPREPLY=()
     fi
-
-    # Second argument: only `config` takes an option (--generate).
-    case "${COMP_WORDS[1]}" in
-        config)
-            if [ "${cword:-$COMP_CWORD}" -eq 2 ]; then
-                mapfile -t COMPREPLY < <(compgen -W "--generate" -- "$cur")
-            fi
-            ;;
-        *)
-            COMPREPLY=()
-            ;;
-    esac
     return 0
 }
 

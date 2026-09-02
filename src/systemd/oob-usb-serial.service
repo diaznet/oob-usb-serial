@@ -8,14 +8,14 @@ Wants=systemd-udev-settle.service
 [Service]
 Type=forking
 EnvironmentFile=-/etc/oob-usb-serial/oob-usb-serial.conf
-# Run the detached screen session as the configured OOB user.
+# Run the detached tmux session as the configured OOB user.
 User=oob
-# Start the session; screen -dmS backgrounds itself, hence Type=forking.
+# Start the session; tmux new-session -d backgrounds itself, hence Type=forking.
 ExecStart=/usr/bin/oob-usb-serial start
 ExecStop=/usr/bin/oob-usb-serial stop
 Restart=on-failure
 RestartSec=5
-# The session is a persistent screen daemon owned by the service.
+# The session is a persistent tmux server owned by the service.
 RemainAfterExit=yes
 
 [Install]
