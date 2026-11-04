@@ -1,0 +1,58 @@
+name: Wiki
+
+# The wiki is generated: its pages live in docs/wiki/ (reviewed in PRs next to
+# the code they describe) and are mirrored to the GitHub wiki on every change
+# to main. Edits made directly on the wiki are overwritten.
+#
+# One-time prerequisite: the wiki must exist, i.e. its first page must have
+# been saved once through the web UI (GitHub only creates the wiki git repo
+# then).
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'docs/wiki/**'
+      - '.github/workflows/wiki.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: wiki
+  cancel-in-progress: false
+
+permissions:
+  contents: write   # GITHUB_TOKEN needs write access to push to the wiki repo
+
+jobs:
+  publish:
+    name: Publish docs/wiki to the GitHub wiki
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Mirror docs/wiki into the wiki repository
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+          wiki_url="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.wiki.git"
+          if ! git clone --quiet "$wiki_url" wiki 2>/dev/null; then
+            echo "::error::Cannot clone the wiki. Enable it and save its first page once in the web UI."
+            exit 1
+          fi
+
+          # Replace the wiki content with docs/wiki (keeping its .git).
+          find wiki -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
+          cp -R docs/wiki/. wiki/
+
+          cd wiki
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "Wiki already up to date."
+            exit 0
+          fi
+          git commit --quiet -m "Sync from ${GITHUB_REPOSITORY}@${GITHUB_SHA::7}"
+          git push --quiet origin HEAD
