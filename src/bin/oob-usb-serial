@@ -4,8 +4,8 @@
 #
 # Discovers USB-to-serial adapters attached to the host and opens each one as a
 # named window inside a single detached tmux session, each window running tio
-# on the adapter's stable /dev/serial/by-id path. The whole set of consoles is
-# then reachable over SSH from a Raspberry Pi acting as an OOB jump host.
+# on the adapter's stable /dev/serial path. The whole set of consoles is then
+# reachable over SSH from a Raspberry Pi acting as an OOB jump host.
 #
 # Subcommands:
 #   discover              List discovered adapters (raw tab-separated records)
@@ -21,6 +21,12 @@
 # Configuration:
 #   /etc/oob-usb-serial/oob-usb-serial.conf   global defaults
 #   /etc/oob-usb-serial/devices.conf          per-device mappings
+#
+# Environment overrides (mainly for tests):
+#   OOB_CONF, OOB_DEVICES_CONF   config file locations
+#   OOB_LIB_DIR                  library directory
+#   OOB_TMUX_SOCKET              tmux socket name (default: oob)
+#   OOB_SYSFS_ROOT, OOB_DEV_ROOT see lib/discover.sh
 
 set -o errexit
 set -o nounset
@@ -29,13 +35,16 @@ set -o pipefail
 PROG="oob-usb-serial"
 
 # ---------------------------------------------------------------------------
-# Locate the library directory (installed layout or source tree).
+# Locate the library directory: explicit override, then the source tree next
+# to this script, then the installed location.
 # ---------------------------------------------------------------------------
 _self_dir="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
-if [ -f "/usr/lib/${PROG}/discover.sh" ]; then
-    OOB_LIB_DIR="/usr/lib/${PROG}"
+if [ -n "${OOB_LIB_DIR:-}" ] && [ -f "${OOB_LIB_DIR}/discover.sh" ]; then
+    :
 elif [ -f "${_self_dir}/../lib/discover.sh" ]; then
     OOB_LIB_DIR="$(cd "${_self_dir}/../lib" && pwd)"
+elif [ -f "/usr/lib/${PROG}/discover.sh" ]; then
+    OOB_LIB_DIR="/usr/lib/${PROG}"
 else
     printf '%s: cannot locate library directory\n' "$PROG" >&2
     exit 1
@@ -56,7 +65,7 @@ OOB_DEFAULT_FLOW="none"
 OOB_SESSION_NAME="oob"
 OOB_LOG_DIR=""
 OOB_USER="oob"
-OOB_RUNTIME_DIR="/run/${PROG}"
+OOB_RUNTIME_DIR="${OOB_RUNTIME_DIR:-/run/${PROG}}"
 
 if [ -f "$OOB_CONF" ]; then
     # shellcheck source=/dev/null
@@ -75,7 +84,7 @@ export OOB_DEFAULT_BAUD OOB_DEFAULT_DATA OOB_DEFAULT_PARITY OOB_DEFAULT_STOP \
 # per-user (the socket lives under the caller's runtime dir), so the session
 # commands must all run as OOB_USER to share the one real server. See
 # _ensure_oob_user below.
-TMUX_SOCKET="oob"
+TMUX_SOCKET="${OOB_TMUX_SOCKET:-oob}"
 _tmux() { tmux -L "$TMUX_SOCKET" "$@"; }
 
 _err()  { printf '%s: %s\n' "$PROG" "$*" >&2; }
@@ -85,11 +94,28 @@ _require() {
     command -v "$1" >/dev/null 2>&1 || _die "required command '$1' not found"
 }
 
+# _oob_prepare_dirs
+# Run as root before dropping to OOB_USER: create the runtime directory (and
+# the log directory, if configured) owned by OOB_USER. Existing directories
+# are never re-owned, so a misconfigured path cannot hand a system directory
+# to OOB_USER.
+_oob_prepare_dirs() {
+    local grp dir
+    grp="$(id -gn "$OOB_USER" 2>/dev/null || printf '%s' "$OOB_USER")"
+    for dir in "$OOB_RUNTIME_DIR" "$OOB_LOG_DIR"; do
+        [ -n "$dir" ] || continue
+        [ -e "$dir" ] && continue
+        install -d -m 0750 -o "$OOB_USER" -g "$grp" "$dir" 2>/dev/null \
+            || _err "warning: could not create ${dir}"
+    done
+}
+
 # _ensure_oob_user
 # Session commands (start/stop/attach/status) must act on OOB_USER's tmux
 # server. Because `tmux -L` sockets are per-user, running as anyone else would
 # create or inspect a *different* server. If the caller is not OOB_USER:
-#   * as root -> re-exec the whole command as OOB_USER (runuser, fallback sudo)
+#   * as root -> prepare directories, then re-exec the whole command as
+#                OOB_USER (runuser, fallback sudo)
 #   * otherwise -> refuse with a clear message.
 # When the caller already is OOB_USER, this is a no-op.
 _ensure_oob_user() {
@@ -102,6 +128,7 @@ _ensure_oob_user() {
     fi
 
     if [ "$(id -u)" = "0" ]; then
+        _oob_prepare_dirs
         if command -v runuser >/dev/null 2>&1; then
             exec runuser -u "$OOB_USER" -- "$0" "$@"
         elif command -v sudo >/dev/null 2>&1; then
@@ -131,7 +158,7 @@ _oob_perm_hint() {
     _err "cannot access ${dev}: permission denied."
     _err "Add your user to the '${grp}' group, then log out and back in:"
     _err "    sudo usermod -aG ${grp} \$USER"
-    _err "(the packaged 'oob' user is added to dialout automatically.)"
+    _err "(the packaged '${OOB_USER}' user is added to dialout automatically.)"
 }
 
 # ---------------------------------------------------------------------------
@@ -143,34 +170,30 @@ cmd_discover() {
 }
 
 cmd_list() {
-    local raw
-    raw="$(oob_discover_raw)"
-    if [ -z "$raw" ]; then
+    local resolved
+    resolved="$(oob_resolve)"
+    if [ -z "$resolved" ]; then
         printf 'No USB serial adapters found.\n'
         return 0
     fi
 
-    printf '%-12s %-13s %-8s %-7s %-40s %s\n' \
-        "NAME" "DEVICE" "BAUD" "FRAMING" "BY-ID" "ID_SERIAL"
-    printf '%-12s %-13s %-8s %-7s %-40s %s\n' \
-        "----" "------" "----" "-------" "-----" "---------"
+    printf '%-24s %-5s %-13s %-8s %-8s %s\n' \
+        "NAME" "FROM" "DEVICE" "BAUD" "FRAMING" "ID_SERIAL"
+    printf '%-24s %-5s %-13s %-8s %-8s %s\n' \
+        "----" "----" "------" "----" "-------" "---------"
 
-    local devnode id_serial vendor model byid cfg name baud data parity stop flow summary
-    while IFS=$'\t' read -r devnode id_serial vendor model byid; do
-        [ -z "${devnode:-}" ] && continue
-        : "$vendor" "$model"
-        cfg="$(_oob_lookup_config "$id_serial")"
-        if [ -n "$cfg" ]; then
-            IFS='|' read -r name baud data parity stop flow <<< "$cfg"
-        else
-            name="(auto)"
-            baud="$OOB_DEFAULT_BAUD"; data="$OOB_DEFAULT_DATA"
-            parity="$OOB_DEFAULT_PARITY"; stop="$OOB_DEFAULT_STOP"; flow="$OOB_DEFAULT_FLOW"
+    local name baud data parity stop flow target devnode id_serial bypath mapped from
+    while IFS=$'\t' read -r name baud data parity stop flow target devnode id_serial mapped bypath; do
+        [ -n "${name:-}" ] || continue
+        if [ "$mapped" = "yes" ]; then from="conf"; else from="auto"; fi
+        printf '%-24s %-5s %-13s %-8s %-8s %s\n' \
+            "$name" "$from" "${devnode##*/}" "$baud" \
+            "$(_oob_framing_summary "$data" "$parity" "$stop" "$flow")" "$id_serial"
+        printf '    opens: %s\n' "$target"
+        if [ -n "$bypath" ] && [ "$bypath" != "$target" ]; then
+            printf '    port:  %s\n' "$bypath"
         fi
-        summary="$(_oob_framing_summary "$data" "$parity" "$stop" "$flow")"
-        printf '%-12s %-13s %-8s %-7s %-40s %s\n' \
-            "$name" "$devnode" "$baud" "$summary" "$byid" "$id_serial"
-    done <<< "$raw"
+    done <<< "$resolved"
 }
 
 _session_running() {
@@ -185,9 +208,9 @@ cmd_start() {
         return 0
     fi
 
-    local raw
-    raw="$(oob_discover_raw)"
-    if [ -z "$raw" ]; then
+    local resolved
+    resolved="$(oob_resolve)"
+    if [ -z "$resolved" ]; then
         _err "no adapters discovered; not starting an empty session"
         return 1
     fi
@@ -197,33 +220,28 @@ cmd_start() {
             || _err "warning: could not create log dir ${OOB_LOG_DIR}"
     fi
 
-    local tmuxconf
-    tmuxconf="$(oob_tmux_config_path)"
+    # Read tio's version once, in this shell, so the per-window command
+    # builders (run in subshells) share the cached value.
+    _oob_tio_version >/dev/null
+
+    local rundir tmuxconf
+    rundir="$(oob_runtime_dir)"
+    tmuxconf="${rundir}/tmux.conf"
     oob_generate_tmux_config > "$tmuxconf"
 
-    local devnode id_serial vendor model byid cfg name baud data parity stop flow
-    local first=1 windows=0 inaccessible=0
-    while IFS=$'\t' read -r devnode id_serial vendor model byid; do
-        [ -z "${devnode:-}" ] && continue
-        : "$vendor" "$model"
+    local name baud data parity stop flow target devnode id_serial bypath mapped
+    local first=1 windows=0 denied=""
+    while IFS=$'\t' read -r name baud data parity stop flow target devnode id_serial mapped bypath; do
+        [ -n "${name:-}" ] || continue
+        : "$devnode" "$id_serial" "$bypath" "$mapped"
 
-        cfg="$(_oob_lookup_config "$id_serial")"
-        if [ -n "$cfg" ]; then
-            IFS='|' read -r name baud data parity stop flow <<< "$cfg"
-        else
-            name="$(_oob_sanitize_name "${model:-serial}_${id_serial}")"
-            name="${name:0:24}"
-            baud="$OOB_DEFAULT_BAUD"; data="$OOB_DEFAULT_DATA"
-            parity="$OOB_DEFAULT_PARITY"; stop="$OOB_DEFAULT_STOP"; flow="$OOB_DEFAULT_FLOW"
-        fi
-
-        if ! _oob_device_accessible "$byid"; then
-            inaccessible=$((inaccessible + 1))
-            _err "warning: cannot access ${byid} (its console window may not stay open)"
+        if ! _oob_device_accessible "$target"; then
+            [ -n "$denied" ] || denied="$target"
+            _err "warning: cannot access ${target} (its console window may not stay open)"
         fi
 
         local tio_cmd
-        tio_cmd="$(_oob_tio_command "$name" "$byid" "$baud" "$data" "$parity" "$stop" "$flow")"
+        tio_cmd="$(_oob_tio_command "$name" "$target" "$baud" "$data" "$parity" "$stop" "$flow")"
 
         if [ "$first" -eq 1 ]; then
             _tmux -f "$tmuxconf" new-session -d -s "$OOB_SESSION_NAME" -n "$name" "$tio_cmd"
@@ -232,7 +250,12 @@ cmd_start() {
             _tmux new-window -t "$OOB_SESSION_NAME" -n "$name" "$tio_cmd"
         fi
         windows=$((windows + 1))
-    done <<< "$raw"
+    done <<< "$resolved"
+
+    # tmux has read its config once the server is up; drop a temporary copy.
+    if [ "$rundir" != "$OOB_RUNTIME_DIR" ]; then
+        rm -rf -- "$rundir"
+    fi
 
     if [ "$windows" -eq 0 ]; then
         _err "no adapters opened; not starting an empty session"
@@ -241,10 +264,8 @@ cmd_start() {
 
     _tmux select-window -t "$OOB_SESSION_NAME:0" 2>/dev/null || true
 
-    if [ "$inaccessible" -gt 0 ]; then
-        local anydev
-        anydev="$(oob_discover_raw | awk -F '\t' 'NF{print $5; exit}')"
-        _oob_perm_hint "${anydev:-/dev/ttyUSB0}"
+    if [ -n "$denied" ]; then
+        _oob_perm_hint "$denied"
     fi
     _err "started detached session '${OOB_SESSION_NAME}' with ${windows} console(s) (attach with: $PROG attach)"
 }
@@ -284,12 +305,14 @@ cmd_status() {
     return 3
 }
 
-# _oob_append_section <conf> <name> <id_serial> <baud> <data> <parity> <stop> <flow>
+# _oob_append_section <conf> <name> <id_serial> <path> <baud> <data> <parity> <stop> <flow>
+# <path> may be empty (no path key written).
 _oob_append_section() {
-    local conf="$1" name="$2" id="$3" baud="$4" data="$5" parity="$6" stop="$7" flow="$8"
+    local conf="$1" name="$2" id="$3" path="$4" baud="$5" data="$6" parity="$7" stop="$8" flow="$9"
     {
         printf '\n[%s]\n' "$name"
         printf 'match  = %s\n' "$id"
+        [ -z "$path" ] || printf 'path   = %s\n' "$path"
         printf 'baud   = %s\n' "$baud"
         printf 'data   = %s\n' "$data"
         printf 'parity = %s\n' "$parity"
@@ -298,8 +321,33 @@ _oob_append_section() {
     } >> "$conf"
 }
 
+# _oob_ask <label> <default> <validator>
+# Prompt until the answer passes <validator> (Enter accepts the default; EOF
+# takes the default). The answer is left in _OOB_ANSWER.
+_OOB_ANSWER=""
+_oob_ask() {
+    local label="$1" def="$2" check="$3" reply
+    while :; do
+        printf '    %s [%s]: ' "$label" "$def"
+        if ! read -r reply; then
+            printf '\n'
+            _OOB_ANSWER="$def"
+            return 0
+        fi
+        reply="$(_oob_trim "$reply")"
+        [ -n "$reply" ] || reply="$def"
+        if "$check" "$reply"; then
+            _OOB_ANSWER="$reply"
+            return 0
+        fi
+        printf '    invalid value "%s", try again.\n' "$reply"
+    done
+}
+
 # Config scaffolder: for each unmapped adapter, prompt for name + serial line
-# settings and append an INI section to devices.conf.
+# settings and append an INI section to devices.conf. Adapters that share an
+# ID_SERIAL with another attached adapter also get a `path` key (their USB
+# port) so each one is mapped separately.
 cmd_config() {
     local raw
     raw="$(oob_discover_raw)"
@@ -317,55 +365,86 @@ cmd_config() {
             || _die "cannot create ${OOB_DEVICES_CONF} (re-run with sudo)"
     fi
 
+    local dups
+    dups="$(_oob_dup_serials "$raw")"
+
     printf 'Configuring device mappings in %s\n' "$OOB_DEVICES_CONF"
     printf 'Press Enter to accept the [default], or type "s" to skip a device.\n\n'
 
-    local devnode id_serial vendor model byid existing added=0
-    while IFS=$'\t' read -r -u 3 devnode id_serial vendor model byid; do
-        [ -z "${devnode:-}" ] && continue
+    local devnode id_serial vendor model byid bypath existing added=0
+    while IFS=$'\t' read -r -u 3 devnode id_serial vendor model byid bypath; do
+        [ -n "${devnode:-}" ] || continue
         : "$vendor" "$byid"
 
-        existing="$(_oob_lookup_config "$id_serial")"
+        existing="$(_oob_lookup_config "$id_serial" "$bypath")"
         if [ -n "$existing" ]; then
             printf '  %s [%s] -> already mapped as "%s", skipping.\n' \
                 "$devnode" "$model" "${existing%%|*}"
             continue
         fi
 
+        local ambiguous=0 path_key=""
+        if [ -n "$dups" ] && printf '%s\n' "$dups" | grep -Fxq -- "$id_serial"; then
+            ambiguous=1
+            [ -z "$bypath" ] || path_key="${bypath##*/}"
+        fi
+
         printf '  Device: %s\n    model=%s serial=%s\n' "$devnode" "$model" "$id_serial"
+        if [ "$ambiguous" -eq 1 ]; then
+            if [ -n "$path_key" ]; then
+                printf '    (another adapter reports the same serial; matching by USB port: %s)\n' "$path_key"
+            else
+                printf '    warning: another adapter reports the same serial and no USB port path\n'
+                printf '    is available; this mapping will apply to both.\n'
+            fi
+        fi
 
-        local def_name reply name baud data parity stop flow
-        def_name="$(_oob_sanitize_name "${model:-serial}_${id_serial}")"
-        def_name="${def_name:0:24}"
+        local def_name reply name
+        def_name="$(_oob_auto_name "$model" "$id_serial" "$bypath" "$ambiguous")"
 
-        printf '    name [%s] (or "s" to skip): ' "$def_name"
-        read -r reply || reply=""
-        case "$reply" in
-            s|S|skip) printf '    skipped.\n\n'; continue ;;
-            "") name="$def_name" ;;
-            *) name="$reply" ;;
-        esac
+        name=""
+        while [ -z "$name" ]; do
+            printf '    name [%s] (or "s" to skip): ' "$def_name"
+            read -r reply || reply=""
+            reply="$(_oob_trim "$reply")"
+            case "$reply" in
+                s|S|skip) break ;;
+                "") name="$def_name" ;;
+                *)
+                    name="$(_oob_sanitize_name "$reply")"
+                    if [ -z "$name" ]; then
+                        printf '    invalid name, use letters, digits, ".", "_" or "-".\n'
+                    elif [ "$name" != "$reply" ]; then
+                        printf '    using "%s" (allowed: letters, digits, ".", "_", "-")\n' "$name"
+                    fi
+                    ;;
+            esac
+        done
+        if [ -z "$name" ]; then
+            printf '    skipped.\n\n'
+            continue
+        fi
 
-        printf '    baud [%s]: ' "$OOB_DEFAULT_BAUD"
-        read -r reply || reply=""; baud="${reply:-$OOB_DEFAULT_BAUD}"
-        printf '    data bits [%s]: ' "$OOB_DEFAULT_DATA"
-        read -r reply || reply=""; data="${reply:-$OOB_DEFAULT_DATA}"
-        printf '    parity (none/odd/even) [%s]: ' "$OOB_DEFAULT_PARITY"
-        read -r reply || reply=""; parity="${reply:-$OOB_DEFAULT_PARITY}"
-        printf '    stop bits [%s]: ' "$OOB_DEFAULT_STOP"
-        read -r reply || reply=""; stop="${reply:-$OOB_DEFAULT_STOP}"
-        printf '    flow (none/soft/hard) [%s]: ' "$OOB_DEFAULT_FLOW"
-        read -r reply || reply=""; flow="${reply:-$OOB_DEFAULT_FLOW}"
+        local baud data parity stop flow
+        _oob_ask "baud" "$OOB_DEFAULT_BAUD" _oob_valid_baud; baud="$_OOB_ANSWER"
+        _oob_ask "data bits (5-8)" "$OOB_DEFAULT_DATA" _oob_valid_data; data="$_OOB_ANSWER"
+        _oob_ask "parity (none/odd/even)" "$OOB_DEFAULT_PARITY" _oob_valid_parity; parity="$_OOB_ANSWER"
+        _oob_ask "stop bits (1/2)" "$OOB_DEFAULT_STOP" _oob_valid_stop; stop="$_OOB_ANSWER"
+        _oob_ask "flow (none/soft/hard)" "$OOB_DEFAULT_FLOW" _oob_valid_flow; flow="$_OOB_ANSWER"
 
-        _oob_append_section "$OOB_DEVICES_CONF" "$name" "$id_serial" \
+        _oob_append_section "$OOB_DEVICES_CONF" "$name" "$id_serial" "$path_key" \
             "$baud" "$data" "$parity" "$stop" "$flow"
         added=$((added + 1))
-        printf '    added [%s] (match = %s)\n\n' "$name" "$id_serial"
+        if [ -n "$path_key" ]; then
+            printf '    added [%s] (match = %s, path = %s)\n\n' "$name" "$id_serial" "$path_key"
+        else
+            printf '    added [%s] (match = %s)\n\n' "$name" "$id_serial"
+        fi
     done 3<<< "$raw"
 
     if [ "$added" -gt 0 ]; then
         printf 'Wrote %d new mapping(s) to %s\n' "$added" "$OOB_DEVICES_CONF"
-        printf "Apply them with: %s start   (or 'stop' then 'start' if running)\n" "$PROG"
+        printf 'Apply them with: %s restart\n' "$PROG"
     else
         printf 'No new mappings added.\n'
     fi
@@ -390,11 +469,13 @@ Commands:
 
 In the tmux session: Ctrl-b n/p switch consoles, Ctrl-b w lists them,
 Ctrl-b d detaches, Ctrl-b R relaunches a closed console. Inside a console,
-tio quits with Ctrl-t q.
+tio quits with Ctrl-t q. Adapters plugged in after start appear on restart.
 
 Config:
   ${OOB_CONF}
   ${OOB_DEVICES_CONF}
+
+Docs: https://github.com/diaznet/oob-usb-serial/wiki
 EOF
 }
 
