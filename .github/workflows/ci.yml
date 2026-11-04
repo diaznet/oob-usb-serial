@@ -5,10 +5,42 @@ on:
     branches: [ main ]
   pull_request:
     branches: [ main ]
+  # The release workflow runs this whole pipeline before publishing.
+  workflow_call:
+
+permissions:
+  contents: read
 
 jobs:
+  test-debian:
+    name: Tests (Debian ${{ matrix.debian }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The releases the package targets: tmux 3.1 / bats 1.2 (bullseye)
+        # up to the current stable.
+        debian: [ bullseye, bookworm, trixie ]
+    container: debian:${{ matrix.debian }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install test tooling
+        run: |
+          apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+            bats tmux make procps >/dev/null
+
+      - name: Run the bats suite (as an unprivileged user)
+        # Some tests (permission checks, the OOB_USER refusal) only make sense
+        # as a non-root user, so don't run them as the container's root.
+        run: |
+          useradd --create-home tester
+          runuser -u tester -- make test
+
   lint-and-build:
-    name: Lint and test build
+    name: Lint, test, build and install
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -18,10 +50,13 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
-            shellcheck build-essential dpkg-dev debhelper fakeroot lintian
+            shellcheck bats tmux build-essential dpkg-dev debhelper fakeroot lintian
 
       - name: ShellCheck
         run: make check
+
+      - name: Tests
+        run: make test
 
       - name: Build .deb (no tag => uses changelog version)
         run: bash ./build.sh
@@ -31,6 +66,16 @@ jobs:
           deb=$(ls dist/*.deb | head -1)
           echo "Linting $deb"
           lintian "$deb"
+
+      - name: Install smoke test
+        run: |
+          deb=$(ls dist/*.deb | head -1)
+          sudo apt-get install -y "./$deb"
+          id oob
+          id -nG oob | grep -qw dialout
+          oob-usb-serial help >/dev/null
+          oob-usb-serial list
+          systemd-analyze verify --man=no /lib/systemd/system/oob-usb-serial.service
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

@@ -16,7 +16,9 @@ INSTALL      = install
 INSTALL_DATA = $(INSTALL) -m 0644
 INSTALL_BIN  = $(INSTALL) -m 0755
 
-.PHONY: all install uninstall check clean
+BATS ?= bats
+
+.PHONY: all install uninstall check test clean
 
 all:
 	@echo "Nothing to build. Use 'make install' (honours DESTDIR/PREFIX)."
@@ -66,7 +68,13 @@ check:
 	# config files (sourced dynamically) do not exist at lint time.
 	shellcheck -x -e SC1091 -s bash src/bin/oob-usb-serial src/lib/discover.sh src/lib/session-gen.sh
 	shellcheck -s bash build.sh scripts/build-apt-repo.sh scripts/setup-apt-signing-key.sh
-	shellcheck -s sh src/profile/oob-usb-serial.sh
+	shellcheck -s sh src/profile/oob-usb-serial.sh debian/postinst debian/postrm
+	shellcheck -s bash tests/helpers.bash
+
+# Bats suite: fake sysfs/udev/tio, real tmux on a private socket. Needs bats
+# and tmux; never touches real devices or /etc.
+test:
+	$(BATS) tests/
 
 clean:
 	@true
