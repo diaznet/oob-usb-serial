@@ -1,22 +1,23 @@
 [Unit]
 Description=OOB USB serial console multiplexer
-Documentation=man:oob-usb-serial
-# Give udev time to enumerate the USB serial adapters before we discover them.
-After=multi-user.target systemd-udev-settle.service
-Wants=systemd-udev-settle.service
+Documentation=man:oob-usb-serial(1) https://github.com/diaznet/oob-usb-serial/wiki
+# Discover adapters once udev has processed the coldplug events. Adapters that
+# enumerate late make the first start fail ("no adapters"); the restart policy
+# below retries for a few minutes before giving up.
+After=systemd-udevd.service systemd-udev-trigger.service
+StartLimitIntervalSec=300
+StartLimitBurst=10
 
 [Service]
+# Started as root on purpose: the script reads OOB_USER from
+# /etc/oob-usb-serial/oob-usb-serial.conf, prepares /run/oob-usb-serial for
+# that user and then re-executes itself as OOB_USER (runuser). Do not add
+# User= here; change OOB_USER in the config instead.
 Type=forking
-EnvironmentFile=-/etc/oob-usb-serial/oob-usb-serial.conf
-# Run the detached tmux session as the configured OOB user.
-User=oob
-# Start the session; tmux new-session -d backgrounds itself, hence Type=forking.
 ExecStart=/usr/bin/oob-usb-serial start
 ExecStop=/usr/bin/oob-usb-serial stop
 Restart=on-failure
-RestartSec=5
-# The session is a persistent tmux server owned by the service.
-RemainAfterExit=yes
+RestartSec=15
 
 [Install]
 WantedBy=multi-user.target

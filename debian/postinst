@@ -2,10 +2,25 @@
 # postinst script for oob-usb-serial
 set -e
 
-OOB_USER="oob"
+CONF="/etc/oob-usb-serial/oob-usb-serial.conf"
+
+# The session user comes from OOB_USER in the config (default: oob). Read it
+# as text (the last OOB_USER= assignment wins, as when the file is sourced)
+# rather than sourcing the file as root.
+oob_user() {
+    u=""
+    if [ -f "$CONF" ]; then
+        u="$(sed -n "s/^[[:space:]]*OOB_USER=[\"']\{0,1\}\([A-Za-z0-9_.-]*\)[\"']\{0,1\}.*/\1/p" "$CONF" | tail -n 1)"
+    fi
+    case "$u" in
+        ""|-*|*[!A-Za-z0-9_.-]*) u="oob" ;;
+    esac
+    printf '%s' "$u"
+}
 
 case "$1" in
     configure)
+        OOB_USER="$(oob_user)"
         # Create a dedicated system user to own the console session, if it does
         # not already exist. Membership in 'dialout' grants access to the
         # /dev/ttyUSB* serial devices.

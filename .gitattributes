@@ -4,6 +4,9 @@
 *.conf          text eol=lf
 *.service       text eol=lf
 *.1             text eol=lf
+*.bats          text eol=lf
+*.bash          text eol=lf
+*.yml           text eol=lf
 Makefile        text eol=lf
 debian/*        text eol=lf
 # Files without a matching extension; force LF.

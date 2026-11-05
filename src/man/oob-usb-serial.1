@@ -1,10 +1,9 @@
-.TH OOB-USB-SERIAL 1 "2026-08-31" "oob-usb-serial 2.0.0" "User Commands"
+.TH OOB-USB-SERIAL 1 "2026-11-04" "oob-usb-serial 2.1.0" "User Commands"
 .SH NAME
 oob-usb-serial \- out-of-band USB serial console multiplexer
 .SH SYNOPSIS
 .B oob-usb-serial
 .I command
-.RI [ args ]
 .SH DESCRIPTION
 .B oob-usb-serial
 discovers every USB-to-serial adapter attached to the host and opens each one
@@ -12,11 +11,13 @@ as a named window inside a single detached
 .BR tmux (1)
 session, each window running
 .BR tio (1)
-on the adapter's stable
+on a stable
 .I /dev/serial/by-id
-path. Adapters are matched by their stable udev
+(or, for adapters that share a serial number,
+.IR /dev/serial/by-path )
+link. Adapters are matched by their stable udev
 .B ID_SERIAL
-identifier rather than by their
+identifier, optionally narrowed to a USB port, rather than by their
 .I /dev/ttyUSBx
 node, which is not stable across reboots or replugs.
 .PP
@@ -27,10 +28,11 @@ over SSH.
 .TP
 .B discover
 List discovered adapters as raw tab-separated records
-(device node, ID_SERIAL, vendor, model, by-id path).
+(device node, ID_SERIAL, vendor, model, by-id path, by-path path).
 .TP
 .B list
-Human-friendly table of adapters and their resolved configuration.
+Human-friendly table of adapters, their resolved configuration and the path
+tio opens.
 .TP
 .B start
 Start the detached tmux session, one window per adapter running tio.
@@ -42,19 +44,34 @@ Attach to the session, starting it first if it is not running.
 Terminate the session.
 .TP
 .B restart
-Stop the session (if running) and start it again.
+Stop the session (if running) and start it again. Use it to pick up adapters
+plugged in after the start, or configuration changes.
 .TP
 .B status
-Report whether the session is running.
+Report whether the session is running (exit status 0) or not (exit status 3).
 .TP
 .B config
 Map each discovered adapter into
 .IR devices.conf ,
-prompting for a window name and serial line settings (adapters already mapped
-are skipped). Writing usually requires root.
+prompting for a window name and serial line settings; invalid answers are
+asked again and adapters already mapped are skipped. Adapters that share an
+ID_SERIAL with another attached adapter also get a
+.B path
+key. Writing usually requires root.
 .TP
 .B help
 Show usage information.
+.PP
+The session commands
+.RB ( start ,
+.BR stop ,
+.BR restart ,
+.BR attach ,
+.BR status )
+always act on the session of
+.BR OOB_USER .
+Run as root, they switch to that user first; run as any other user, they
+refuse.
 .SH "TMUX KEYS"
 Within the session:
 .B Ctrl-b n
@@ -66,19 +83,25 @@ lists them,
 .B Ctrl-b d
 detaches, and
 .B Ctrl-b R
-relaunches a console that has closed.
+relaunches a console that has closed. Inside a console,
+.B Ctrl-t q
+quits tio.
 .SH FILES
 .TP
 .I /etc/oob-usb-serial/oob-usb-serial.conf
 Global defaults: baud, data, parity, stop, flow, session name, log directory
-and OOB user.
+and
+.B OOB_USER
+(the account that owns the session).
 .TP
 .I /etc/oob-usb-serial/devices.conf
 Per-device mappings in INI format. Each
 .RI [ section ]
 names a tmux window and contains a
 .B match
-glob (against udev ID_SERIAL) plus optional
+glob (against udev ID_SERIAL) and/or a
+.B path
+glob (against the /dev/serial/by-path link), plus optional
 .BR baud ,
 .BR data ,
 .BR parity ,
@@ -87,11 +110,16 @@ and
 .B flow
 keys.
 .TP
+.I /run/oob-usb-serial/
+Generated tmux configuration.
+.TP
 .I /usr/share/bash-completion/completions/oob-usb-serial
 Bash tab-completion for the subcommands.
-.SH SEE ALSO
+.SH "SEE ALSO"
 .BR tio (1),
 .BR tmux (1),
 .BR udevadm (8)
+.PP
+Full documentation: https://github.com/diaznet/oob-usb-serial/wiki
 .SH AUTHOR
 diaznet

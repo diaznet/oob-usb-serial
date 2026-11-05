@@ -1,3 +1,30 @@
+oob-usb-serial (2.1.0) unstable; urgency=medium
+
+  * Fix per-console logging on tio 2.x/3.x (Debian 12+): the tio version is
+    detected and the matching flags used (-l on 1.x, --log --log-file on
+    2.x, plus --log-append from 2.6).
+  * Discovery only reports tty devices; USB disks, HID devices and other USB
+    nodes with an ID_SERIAL are no longer opened as consoles. udev properties
+    are parsed as text instead of being eval'ed.
+  * Adapters sharing an ID_SERIAL (clones without a serial number, ports of a
+    multi-port adapter) are opened via /dev/serial/by-path and named by port;
+    devices.conf gains a `path` key, which `config` writes for them.
+  * The service follows OOB_USER from the config: it starts as root, prepares
+    /run/oob-usb-serial (and a missing OOB_LOG_DIR) for that user and drops to
+    it. postinst creates OOB_USER instead of a hard-coded `oob`.
+  * The generated tmux config no longer falls back to a predictable path in
+    /tmp; a private mktemp directory is used when /run is not available.
+  * Service: order after udev coldplug instead of the deprecated
+    systemd-udev-settle; retry every 15s, at most 10 times in 5 minutes.
+  * `config` validates every answer and sanitizes names; invalid values in
+    devices.conf fall back to the defaults with a warning; duplicate window
+    names get a -2, -3, ... suffix.
+  * New bats test suite (`make test`), run in CI on Debian 11, 12 and 13;
+    releases are gated on the full CI pipeline.
+  * Documentation moved to the GitHub wiki (sources in docs/wiki/).
+
+ -- diaznet <diaznet@users.noreply.github.com>  Wed, 04 Nov 2026 12:00:00 +0000
+
 oob-usb-serial (2.0.0) unstable; urgency=medium
 
   * Major refactor from GNU screen to tio + tmux.
